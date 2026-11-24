@@ -3,7 +3,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { openSync, closeSync, readFileSync } from 'node:fs';
-import { chmod, mkdtemp, mkdir, readFile, readdir, stat, writeFile, rm, copyFile, rename } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, stat, writeFile, rm, copyFile, rename, symlink } from 'node:fs/promises';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { after, before, beforeEach, test } from 'node:test';
@@ -42,7 +42,7 @@ function cli(args, options = {}) {
     const child = spawn(viaNode ? process.execPath : entry, viaNode ? [entry, ...args] : args, {
       cwd: options.cwd ?? launch,
       env: { ...process.env, HOME: home, USERPROFILE: home, BROWSER: process.execPath, T3CODE_THREAD_ID: '', ...options.env },
-      stdio: ['ignore', stdout, 'pipe'],
+      stdio: [options.control ? 'pipe' : 'ignore', stdout, 'pipe'],
       timeout: options.timeout ?? 30_000,
     });
     if (typeof stdout === 'number') closeSync(stdout);
@@ -58,6 +58,7 @@ function cli(args, options = {}) {
     });
     child.stderr.on('data', (chunk) => { output += chunk; });
     child.once('error', reject);
+    options.control?.(child);
     child.once('close', (code) => {
       try {
         resolve({ code, output: (options.log ? readFileSync(options.log, 'utf8') : '') + output });
@@ -192,9 +193,94 @@ test('adapter acknowledges delivery without a handoff and rejects malformed arch
   } finally { await server.close(); }
 });
 
-for (const rejectsWorktree of [false, true]) test(rejectsWorktree
-  ? 'a rejected Worktree reaches Core without binding or sending to a thread'
-  : 'native task thread receives one complete prompt after checkpoint and archives only after accepted handoff', { skip: process.platform === 'win32' }, async () => {
+test('exact resume validates the saved thread before unarchive, rename or input', async () => {
+  const original = { threadId: 'saved-thread', projectId: 'project', worktreePath: launch, title: 'issue-42 implement', archived: true, activeRunId: null, status: 'completed', model: 'original-model' };
+  const history = ['Implementation context'];
+  let thread, calls, queued = false, renameDenied = false;
+  const server = await substitute((name, args) => {
+    if (name === 't3_thread_read' && args.threadId === 'launcher') return { thread: { threadId: 'launcher', projectId: 'project' } };
+    assert.equal(args.threadId, 'saved-thread');
+    calls.push(name);
+    if (name === 't3_thread_read') return thread ? { thread, recentRuns: [], items: history } : { code: 'thread_not_found', message: 'Thread not found' };
+    if (name === 't3_queue') {
+      assert.deepEqual(args, { threadId: 'saved-thread', action: 'list', limit: 1 });
+      return { items: queued ? [{ queuedRunId: 'older-queued-run', text: 'Pending', truncated: false }] : [], nextCursor: null };
+    }
+    if (name === 't3_thread_organize') {
+      assert.deepEqual(args, { threadId: 'saved-thread', action: 'unarchive' });
+      thread.archived = false;
+      return { sequence: 1 };
+    }
+    if (name === 't3_thread_update') {
+      assert.equal(thread.archived, false);
+      assert.equal(args.action, 'rename');
+      assert.equal(args.title, 'issue-42 fix review r1');
+      assert.ok(!('modelSelection' in args));
+      if (renameDenied) return { code: 'invalid_request', message: 'Rename rejected' };
+      thread.title = args.title;
+      return { sequence: 2, title: thread.title };
+    }
+    if (name === 't3_thread_send') {
+      assert.equal(thread.title, 'issue-42 fix review r1');
+      assert.equal(thread.archived, false);
+      assert.equal(thread.model, 'original-model');
+      history.push(args.message);
+      return { threadId: args.threadId, messageId: 'message', runId: 'run' };
+    }
+    assert.fail(`Unexpected T3 tool ${name}`);
+  });
+  try {
+    assert.equal((await cli(['auth', 'login', server.endpoint], { approve })).code, 0);
+    const resume = error => cli([server.endpoint, ...(error ? [error] : [])], { entry: fileURLToPath(new URL('./fixtures/resume-check.mjs', import.meta.url)) });
+    for (const [override, error] of [
+      [null, 'not found'],
+      [{ threadId: 'different' }, 'identity'],
+      [{ projectId: 'different' }, 'project'],
+      [{ worktreePath: null }, 'worktree'],
+      [{ worktreePath: '.' }, 'worktree'],
+      [{ worktreePath: home }, 'worktree'],
+      [{ activeRunId: 'active' }, 'finish or stop'],
+      [{ status: 'queued' }, 'finish or stop'],
+    ]) {
+      thread = override && { ...original, ...override };
+      calls = [];
+      const result = await resume(error);
+      assert.equal(result.code, 0, result.output);
+      assert.deepEqual(calls, ['t3_thread_read']);
+      assert.deepEqual(history, ['Implementation context']);
+    }
+    thread = { ...original };
+    queued = true;
+    calls = [];
+    const held = await resume('finish or stop');
+    assert.equal(held.code, 0, held.output);
+    assert.deepEqual(calls, ['t3_thread_read', 't3_queue']);
+    assert.deepEqual(history, ['Implementation context']);
+    queued = false;
+    thread = { ...original };
+    renameDenied = true;
+    calls = [];
+    const rejected = await resume('rename rejected');
+    assert.equal(rejected.code, 0, rejected.output);
+    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_organize', 't3_thread_update']);
+    assert.deepEqual(history, ['Implementation context']);
+    renameDenied = false;
+    const alias = join(home, 'worktree-alias');
+    await symlink(launch, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    thread = { ...original, worktreePath: alias };
+    calls = [];
+    const result = await resume();
+    assert.equal(result.code, 0, result.output);
+    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_organize', 't3_thread_update', 't3_thread_send']);
+    assert.deepEqual(history, ['Implementation context', 'Review fix']);
+    calls = [];
+    const unchanged = await resume();
+    assert.equal(unchanged.code, 0, unchanged.output);
+    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_send']);
+  } finally { await server.close(); }
+});
+
+async function coreFixture() {
   const project = join(launch, 'demo');
   const checkout = join(launch, 'checkout');
   const commands = join(launch, 'commands');
@@ -214,12 +300,35 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
     const file = (await readdir(dir)).find(name => name.endsWith('-42.json'));
     return JSON.parse(await readFile(join(dir, file), 'utf8'));
   };
+  async function initialize(endpoint, review, marker) {
+    assert.equal((await cli(['auth', 'login', endpoint], { approve })).code, 0);
+    assert.equal((await cli(['init', '--project', 'demo', '--mcp-url', endpoint])).code, 0);
+    const configPath = join(project, 'config.yaml');
+    const config = parse(await readFile(configPath, 'utf8'));
+    const agent = { agent: 't3', start: 't3 start --provider codex-instance --model fixture-model --option reasoningEffort=high', resume: 't3 resume {sessionref}' };
+    Object.assign(config, { repository: 'fixture/repo', checkout, issueLabel: '', operationRetry: 0, workflow: { review, maxReviewRounds: 2 }, tracker: { reservationLabel: 'fixture:reserved' }, agents: { implement: agent, review: agent, ciRepair: agent, conflictRepair: agent } });
+    config.terminalPlugins.agentStartDelay = 0;
+    await writeFile(configPath, stringify(config));
+    await writeFile(join(project, 'prompts', 'implement.md'), marker);
+    await writeFile(join(project, 'prompts', 'review.md'), 'Review the fixture.');
+  }
+  const runCli = control => cli(['run', '--project', 'demo', '--issue', '42'], { log, control, env: { T3CODE_THREAD_ID: 'launcher-thread', PATH: `${commands}${delimiter}${process.env.PATH}`, FIXTURE_STATE: stateFile } });
+  return { log, fixture, checkpoint, initialize, runCli, stateFile };
+}
+
+for (const mode of ['normal', 'reject-worktree', 'recover-handoff', 'recover-enter']) test(mode === 'reject-worktree'
+  ? 'a rejected Worktree reaches Core without binding or sending to a thread'
+  : mode === 'normal' ? 'native task thread receives one complete prompt after checkpoint and archives only after accepted handoff'
+    : `fresh CLI resumes interrupted implementation (${mode})`, { skip: process.platform === 'win32' }, async () => {
+  const rejectsWorktree = mode === 'reject-worktree';
+  const recovering = mode.startsWith('recover-');
+  const { log, fixture, checkpoint, initialize, runCli } = await coreFixture();
   const launcher = 'launcher-thread';
   const id = 'native-task-thread';
   const projectId = 'launcher-project';
   const marker = 'Entire user prompt.\n\nSecond line with Unicode: 雪.';
   const history = [];
-  let launched, archived = false, pending, delivered, accepted, launcherReads;
+  let launched, archived = false, pending, delivered, accepted, launcherReads, busy = false, taskReads = 0;
   const server = await substitute(async (name, args) => {
     if (name === 't3_thread_read') {
       if (args.threadId === launcher) {
@@ -227,7 +336,8 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
         return { thread: { threadId: launcher, projectId } };
       }
       assert.equal(args.threadId, id);
-      return { thread: { threadId: id, projectId, archived, activeRunId: null, status: 'completed' }, recentRuns: [], items: history };
+      taskReads++;
+      return { thread: { threadId: id, projectId, worktreePath: launched.workspaceStrategy.worktreePath, title: launched.title, archived, activeRunId: busy ? 'run-1' : null, status: busy ? 'running' : 'completed' }, recentRuns: [], items: history };
     }
     if (name === 't3_thread_launch') {
       assert.equal(launched, undefined);
@@ -241,16 +351,20 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
       if (rejectsWorktree) return { _tag: 'OrchestratorMcpFailure', code: 'invalid_request', message: `worktreePath must be one of the project's git worktrees. ${server.token}` };
       return { threadId: id, projectId, modelSelection: args.modelSelection, runId: null, status: null };
     }
+    if (name === 't3_queue') {
+      assert.deepEqual(args, { threadId: id, action: 'list', limit: 1 });
+      return { items: [], nextCursor: null };
+    }
     if (name === 't3_thread_send') {
       const liveOutput = readFileSync(log, 'utf8');
       assert.equal(args.threadId, id);
-      assert.equal(history.length, 0);
       const saved = await checkpoint();
       assert.equal(saved.roles.implement.sessionid, id);
       assert.equal(saved.phase, 'implementing');
       assert.ok(liveOutput.includes(`Issue #42 implement sessionid=${id} handoff=${saved.invocation.path}`), liveOutput);
       const template = await readFile(join(root, 'install', 'lib', 'node_modules', 'issue-runner-t3', 'node_modules', 'issue-runner-core', 'prompts', 'implement.md'), 'utf8');
-      assert.equal(args.message, template.trimEnd().replace('{{issue}}', '42').replace('{{instructions}}', marker).replace('{{path}}', JSON.stringify(saved.invocation.path)));
+      assert.equal(args.message, history.length ? 'continue' : template.trimEnd().replace('{{issue}}', '42').replace('{{instructions}}', marker).replace('{{path}}', JSON.stringify(saved.invocation.path)));
+      assert.equal(busy, false);
       assert.equal(saved.probe, undefined);
       history.push(args.message);
       delivered = saved.invocation.path;
@@ -267,17 +381,10 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
     }
     assert.fail(`Unexpected T3 tool ${name}`);
   });
+  let child;
   try {
-    assert.equal((await cli(['auth', 'login', server.endpoint], { approve })).code, 0);
-    assert.equal((await cli(['init', '--project', 'demo', '--mcp-url', server.endpoint])).code, 0);
-    const configPath = join(project, 'config.yaml');
-    const config = parse(await readFile(configPath, 'utf8'));
-    const agent = { agent: 't3', start: 't3 start --provider codex-instance --model fixture-model --option reasoningEffort=high', resume: 't3 resume {sessionref}' };
-    Object.assign(config, { repository: 'fixture/repo', checkout, issueLabel: '', operationRetry: 0, workflow: { review: false }, tracker: { reservationLabel: 'fixture:reserved' }, agents: { implement: agent, ciRepair: agent, conflictRepair: agent } });
-    config.terminalPlugins.agentStartDelay = 0;
-    await writeFile(configPath, stringify(config));
-    await writeFile(join(project, 'prompts', 'implement.md'), marker);
-    const run = cli(['run', '--project', 'demo', '--issue', '42'], { log, env: { T3CODE_THREAD_ID: launcher, PATH: `${commands}${delimiter}${process.env.PATH}`, FIXTURE_STATE: stateFile } });
+    await initialize(server.endpoint, false, marker);
+    let run = runCli(recovering ? process => { child = process; } : undefined);
     if (rejectsWorktree) {
       const result = await run;
       assert.notEqual(result.code, 0, result.output);
@@ -302,15 +409,155 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
     assert.equal(pending.result, undefined);
     assert.equal(archived, false);
     assert.equal((await fixture()).closed, undefined);
+    if (recovering) {
+      child.kill('SIGTERM');
+      assert.notEqual((await run).code, 0);
+      busy = true;
+      run = runCli(process => { child = process; });
+      await waitForOutput(log, /Press q to exit.*Enter would advance/, run);
+      assert.match(readFileSync(log, 'utf8'), /finish or stop the turn in T3, then rerun the same command/i);
+      child.stdin.write('q\n');
+      const failed = await run;
+      assert.notEqual(failed.code, 0, failed.output);
+      assert.equal(taskReads, 1);
+      assert.equal(history.length, 1);
+      assert.equal(archived, false);
+      assert.equal((await checkpoint()).roles.implement.sessionid, id);
+      busy = false;
+      if (mode === 'recover-enter') {
+        run = runCli(process => { child = process; });
+        await waitForOutput(log, /Press q to exit.*Enter would advance/, run);
+        assert.equal(taskReads, 1, 'Saved pause must precede retry');
+        child.stdin.write('\n');
+        await waitForOutput(log, /handoff=/, run);
+        const deadline = Date.now() + 10_000;
+        while (history.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+        assert.equal(history.length, 2);
+        assert.equal(taskReads, 2);
+      }
+    }
     await writeFile(`${delivered}.tmp`, JSON.stringify({ outcome: 'no_change', summary: 'Fixture already satisfied.', commits: [], findings_file: null, pr_title: 'Fixture', pr_body: 'Closes #42' }));
     await rename(`${delivered}.tmp`, delivered);
+    if (mode === 'recover-handoff') run = runCli();
     const result = await run;
     assert.equal(result.code, 0, result.output);
     assert.ok(result.output.includes(`Issue #42 implement sessionid=${id} handoff=${delivered}`), result.output);
-    assert.equal(history.length, 1);
-    assert.ok(archived && accepted);
+    assert.equal(history.length, mode === 'recover-enter' ? 2 : 1);
+    if (mode === 'recover-handoff') {
+      assert.equal(taskReads, 1, 'Existing handoff must bypass thread execution');
+      assert.equal(archived, false, 'Unowned thread is retained');
+    } else assert.ok(archived && accepted);
     assert.equal((await fixture()).closed, true);
-  } finally { await server.close(); }
+  } finally {
+    child?.kill('SIGTERM');
+    await server.close();
+  }
+});
+
+async function waitForOutput(log, pattern, run) {
+  const deadline = Date.now() + 15_000;
+  while (Date.now() < deadline) {
+    if (pattern.test(readFileSync(log, 'utf8'))) return;
+    const early = await Promise.race([run, new Promise(resolve => setTimeout(resolve, 50))]);
+    assert.equal(early, undefined, early?.output);
+  }
+  assert.fail(`No ${pattern} in output: ${readFileSync(log, 'utf8')}`);
+}
+
+test('Core Review fix reopens the implementation thread with its history and updated stage title', { skip: process.platform === 'win32' }, async () => {
+  const { log, fixture, checkpoint, initialize, runCli, stateFile } = await coreFixture();
+  const projectId = 'launcher-project';
+  const threads = new Map();
+  const implementation = { sha: 'b'.repeat(40), message: 'Implement fixture' };
+  const fix = { sha: 'c'.repeat(40), message: 'Fix Review finding' };
+  let child, fixed = false, secondReview = false;
+  const saveHandoff = async (path, result) => {
+    await writeFile(`${path}.tmp`, JSON.stringify(result));
+    await rename(`${path}.tmp`, path);
+  };
+  const server = await substitute(async (name, args) => {
+    if (name === 't3_thread_read' && args.threadId === 'launcher-thread') return { thread: { threadId: 'launcher-thread', projectId } };
+    if (name === 't3_thread_launch') {
+      const threadId = args.title === 'issue-42 implement' ? 'implementation' : 'review';
+      assert.equal(threads.has(threadId), false, 'Each role must launch exactly once');
+      assert.equal(args.projectId, projectId);
+      assert.deepEqual(args.workspaceStrategy, { type: 'existing_worktree', worktreePath: (await fixture()).worktree });
+      threads.set(threadId, { threadId, projectId, title: args.title, worktreePath: args.workspaceStrategy.worktreePath, archived: false, activeRunId: null, status: 'completed', modelSelection: args.modelSelection, history: [] });
+      return { threadId, projectId, runId: null };
+    }
+    const thread = threads.get(args.threadId);
+    assert.ok(thread, `Unexpected thread ${args.threadId}`);
+    if (name === 't3_thread_read') return { thread, recentRuns: [], items: thread.history };
+    if (name === 't3_queue') return { items: [], nextCursor: null };
+    if (name === 't3_thread_organize') {
+      if (args.action === 'unarchive') assert.equal(thread.archived, true);
+      else assert.equal(args.action, 'archive');
+      thread.archived = args.action === 'archive';
+      return { sequence: 1 };
+    }
+    if (name === 't3_thread_update') {
+      assert.equal(args.action, 'rename');
+      assert.equal(thread.archived, false);
+      assert.ok(!('modelSelection' in args));
+      thread.title = args.title;
+      return { sequence: 2, title: args.title };
+    }
+    if (name === 't3_thread_send') {
+      assert.equal(thread.archived, false);
+      const saved = await checkpoint();
+      thread.history.push(args.message);
+      if (saved.phase === 'implementing') {
+        assert.equal(args.threadId, 'implementation');
+        await writeFile(stateFile, JSON.stringify({ ...await fixture(), commits: [implementation] }));
+        await saveHandoff(saved.invocation.path, { outcome: 'committed', summary: 'Implemented', commits: [implementation], findings_file: null, pr_title: 'Fixture', pr_body: 'Closes #42' });
+      } else if (saved.phase === 'reviewing' && saved.reviews.length === 1) {
+        assert.equal(args.threadId, 'review');
+        assert.equal(thread.title, 'issue-42 review r1');
+        const round = saved.reviews[0];
+        await writeFile(round.findings, 'Fix the fixture.');
+        await saveHandoff(round.invocation.path, { outcome: 'findings', summary: 'Found a defect', commits: [], findings_file: round.findings });
+      } else if (saved.phase === 'fixing_review') {
+        assert.equal(args.threadId, 'implementation');
+        assert.equal(saved.roles.implement.sessionid, 'implementation');
+        assert.equal(thread.title, 'issue-42 fix review r1');
+        assert.equal(thread.history.length, 2);
+        assert.match(thread.history[0], /Implement the fixture/);
+        assert.ok(args.message.includes(saved.reviews[0].findings));
+        assert.deepEqual(thread.modelSelection, { instanceId: 'codex-instance', model: 'fixture-model', options: [{ id: 'reasoningEffort', value: 'high' }] });
+        await writeFile(stateFile, JSON.stringify({ ...await fixture(), commits: [implementation, fix] }));
+        await saveHandoff(saved.reviews[0].fix.invocation.path, { outcome: 'committed', summary: 'Fixed', commits: [fix], findings_file: null });
+        fixed = true;
+      } else {
+        assert.equal(saved.phase, 'reviewing');
+        assert.equal(saved.reviews.length, 2);
+        assert.equal(args.threadId, 'review');
+        assert.equal(thread.title, 'issue-42 review r2');
+        assert.deepEqual(saved.reviews[0].fix.result.commits, [fix]);
+        secondReview = true;
+      }
+      return { threadId: args.threadId, messageId: randomUUID(), runId: randomUUID() };
+    }
+    assert.fail(`Unexpected T3 tool ${name}`);
+  });
+  try {
+    await initialize(server.endpoint, true, 'Implement the fixture.');
+    const run = runCli(process => { child = process; });
+    const deadline = Date.now() + 15_000;
+    while (!secondReview && Date.now() < deadline) {
+      const early = await Promise.race([run, new Promise(resolve => setTimeout(resolve, 50))]);
+      assert.equal(early, undefined, early?.output);
+    }
+    assert.ok(fixed && secondReview, readFileSync(log, 'utf8'));
+    child.kill('SIGTERM');
+    assert.notEqual((await run).code, 0);
+    assert.equal(threads.size, 2);
+    assert.equal(threads.get('implementation').archived, true);
+    assert.equal(threads.get('implementation').history.length, 2);
+    assert.equal(threads.get('review').history.length, 2);
+  } finally {
+    child?.kill('SIGTERM');
+    await server.close();
+  }
 });
 
 test('custom-only browser login, status, and init use the Core templates and retain the endpoint', async () => {

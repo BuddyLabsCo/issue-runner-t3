@@ -25,8 +25,17 @@ if (tool === 'git') {
     save();
   } else if (args.join(' ') === 'rev-parse --show-toplevel') console.log(process.cwd());
   else if (args.join(' ') === 'branch --show-current') console.log(state.branch);
-  else if (args[0] === 'merge-base') console.log(base);
-  else if (['status', 'log', 'diff', 'check-ref-format', 'for-each-ref'].includes(args[0])) {}
+  else if (args[0] === 'merge-base') {
+    assert.ok(args[1] === base || state.commits?.some(commit => commit.sha === args[1]));
+    console.log(args[1]);
+  }
+  else if (args[0] === 'log') {
+    const commits = state.commits ?? [];
+    const from = args.at(-1).split('..')[0];
+    assert.ok(from === base || commits.some(commit => commit.sha === from));
+    for (const commit of commits.slice(commits.findIndex(commit => commit.sha === from) + 1)) console.log(`${commit.sha}\0${commit.message}`);
+  } else if (args[0] === 'diff' && state.commits?.length) console.log('fixture.txt');
+  else if (['status', 'diff', 'check-ref-format', 'for-each-ref'].includes(args[0])) {}
   else if (args[0] === 'worktree' && args[1] === 'list') {}
   else assert.fail(`Unexpected git command: ${args.join(' ')}`);
 } else if (tool === 'gh') {
