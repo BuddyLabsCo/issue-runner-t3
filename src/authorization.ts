@@ -14,6 +14,8 @@ export async function callMcp(endpoint: string, name: string, args: Record<strin
     retry?.signal?.throwIfAborted();
     try {
       const data = await attemptMcp(endpoint, name, args, credential, retry);
+      // T3 can report an orchestration error after an accepted command fails projection lookup.
+      if (retry && data.code === 'orchestration_error') throw new UncertainMcpError(`${name}: ${data.message}`);
       if (retry && attempt > 0 && 'code' in data) return { ...data, message: `${data.message}. ${retry.uncertainEffect}` };
       return data;
     } catch (error) {
