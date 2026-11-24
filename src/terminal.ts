@@ -85,7 +85,7 @@ export async function createT3Terminal(endpoint: string, launcherId: string): Pr
       if (tab.threadId) {
         const thread = await readThread(tab.threadId);
         if (thread.projectId !== projectId || !('activeRunId' in thread) || thread.activeRunId !== null ||
-          !('status' in thread) || !['idle', 'completed', 'failed', 'cancelled', 'interrupted', 'rolled_back'].includes(String(thread.status))) {
+          !('status' in thread) || typeof thread.status !== 'string' || !['idle', 'completed', 'failed', 'cancelled', 'interrupted', 'rolled_back'].includes(thread.status)) {
           throw new Error('Cannot archive a T3 thread that is busy or belongs to another project.');
         }
         if (!('archived' in thread) || typeof thread.archived !== 'boolean') throw new Error('T3 did not return the thread archival state.');
