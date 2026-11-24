@@ -95,17 +95,17 @@ async function resumeThread(endpoint: string, projectId: string, args: string[],
 
 async function archiveThread(endpoint: string, threadId: string, projectId: string) {
   const busy = 'Cannot archive a T3 thread that is busy or its idle state is unconfirmed. Finish or stop the work in T3 before retrying.';
-  async function alreadyArchived() {
+  async function readArchivedOrRequireIdle() {
     const thread = await readThread(endpoint, threadId, projectId);
     if (typeof thread.archived !== 'boolean') throw new Error('T3 did not return the thread archival state.');
     if (!thread.archived && !hasInactiveRunStatus(thread)) throw new Error(busy);
     return thread.archived;
   }
   try {
-    if (await alreadyArchived()) return;
+    if (await readArchivedOrRequireIdle()) return;
     await assertEmptyQueue(endpoint, threadId, busy);
     // A held turn may have started while the queue was being read.
-    if (await alreadyArchived()) return;
+    if (await readArchivedOrRequireIdle()) return;
   } catch (error) {
     if (error instanceof ThreadNotFoundError) return;
     throw error;
