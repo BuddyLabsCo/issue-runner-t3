@@ -7,6 +7,7 @@ import { callMcp, checkAuthorization } from './authorization.js';
 
 const startUsage = 'Expected t3 start --provider <instance-id> --model <model> [--option <id>=<value>].';
 const busyThreadMessage = 'Saved T3 thread is busy or its idle state is unconfirmed. After exiting, finish or stop the turn in T3, then rerun the same command.';
+class ThreadNotFoundError extends Error {}
 
 function startSelection(args: string[]) {
   const { values } = parseArgs({ args, options: { provider: { type: 'string' }, model: { type: 'string' }, option: { type: 'string', multiple: true } } });
@@ -36,29 +37,34 @@ async function sameWorktree(saved: string, cwd: string) {
 async function call(endpoint: string, name: string, args: Record<string, unknown>, retry?: Parameters<typeof callMcp>[3]) {
   const result = await callMcp(endpoint, name, args, retry);
   if ('code' in result) {
-    if (!retry && result.code === 'thread_not_found') throw new Error('T3 thread not found.');
+    if (!retry && result.code === 'thread_not_found') throw new ThreadNotFoundError('T3 thread not found.');
     throw new Error(`${name}: ${result.message}`);
   }
   return result;
 }
 
-async function readThread(endpoint: string, threadId: string) {
+async function readThread(endpoint: string, threadId: string, projectId?: string) {
   const { thread } = await call(endpoint, 't3_thread_read', { threadId });
   if (!thread || typeof thread !== 'object' || !('threadId' in thread) || thread.threadId !== threadId ||
     !('projectId' in thread) || typeof thread.projectId !== 'string' || !thread.projectId.trim()) {
     throw new Error('T3 returned an invalid thread identity.');
   }
+  if (projectId !== undefined && thread.projectId !== projectId) throw new Error('Saved T3 thread belongs to another project.');
   return thread as Record<string, unknown> & { projectId: string };
 }
 
 async function readResumeCandidate(endpoint: string, threadId: string, projectId: string, cwd: string) {
-  const thread = await readThread(endpoint, threadId);
-  if (thread.projectId !== projectId) throw new Error('Saved T3 thread belongs to another project.');
+  const thread = await readThread(endpoint, threadId, projectId);
   if (typeof thread.worktreePath !== 'string' || !await sameWorktree(thread.worktreePath, cwd)) {
     throw new Error('Saved T3 thread Worktree does not resolve to the Core cwd.');
   }
   if (!hasInactiveRunStatus(thread)) throw new Error(busyThreadMessage);
   return thread;
+}
+
+async function assertEmptyQueue(endpoint: string, threadId: string, message: string) {
+  const queue = await call(endpoint, 't3_queue', { threadId, action: 'list', limit: 1 });
+  if (!Array.isArray(queue.items) || queue.items.length || queue.nextCursor !== null) throw new Error(message);
 }
 
 async function resumeThread(endpoint: string, projectId: string, args: string[], options: CreateTabOptions) {
@@ -67,8 +73,7 @@ async function resumeThread(endpoint: string, projectId: string, args: string[],
     if (!threadId || args.length !== 1) throw new Error('Expected t3 resume <sessionref>.');
     await readResumeCandidate(endpoint, threadId, projectId, options.cwd);
     // A held queued turn can be older than the latest (terminal) run.
-    const queue = await call(endpoint, 't3_queue', { threadId, action: 'list', limit: 1 });
-    if (!Array.isArray(queue.items) || queue.items.length || queue.nextCursor !== null) throw new Error(busyThreadMessage);
+    await assertEmptyQueue(endpoint, threadId, busyThreadMessage);
     // An empty queue may mean a held turn started since the first read.
     const thread = await readResumeCandidate(endpoint, threadId, projectId, options.cwd);
     if (typeof thread.archived !== 'boolean' || typeof thread.title !== 'string') {
@@ -86,6 +91,27 @@ async function resumeThread(endpoint: string, projectId: string, args: string[],
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.message : String(error)} Press q to exit; Enter would advance past the failed execute.`);
   }
+}
+
+async function archiveThread(endpoint: string, threadId: string, projectId: string) {
+  const busy = 'Cannot archive a T3 thread that is busy or its idle state is unconfirmed. Finish or stop the work in T3 before retrying.';
+  async function alreadyArchived() {
+    const thread = await readThread(endpoint, threadId, projectId);
+    if (typeof thread.archived !== 'boolean') throw new Error('T3 did not return the thread archival state.');
+    if (!thread.archived && !hasInactiveRunStatus(thread)) throw new Error(busy);
+    return thread.archived;
+  }
+  try {
+    if (await alreadyArchived()) return;
+    await assertEmptyQueue(endpoint, threadId, busy);
+    // A held turn may have started while the queue was being read.
+    if (await alreadyArchived()) return;
+  } catch (error) {
+    if (error instanceof ThreadNotFoundError) return;
+    throw error;
+  }
+  const receipt = await call(endpoint, 't3_thread_organize', { threadId, action: 'archive' });
+  if (typeof receipt.sequence !== 'number') throw new Error('T3 did not acknowledge thread archival.');
 }
 
 export async function createT3Terminal(endpoint: string, launcherId: string): Promise<TerminalPlugin> {
@@ -146,14 +172,10 @@ export async function createT3Terminal(endpoint: string, launcherId: string): Pr
     async closeTab(handle) {
       const tab = owned(handle);
       if (tab.threadId) {
-        const thread = await readThread(endpoint, tab.threadId);
-        if (thread.projectId !== projectId || !hasInactiveRunStatus(thread)) {
-          throw new Error('Cannot archive a T3 thread that is busy or belongs to another project.');
-        }
-        if (!('archived' in thread) || typeof thread.archived !== 'boolean') throw new Error('T3 did not return the thread archival state.');
-        if (!thread.archived) {
-          const receipt = await call(endpoint, 't3_thread_organize', { threadId: tab.threadId, action: 'archive' });
-          if (typeof receipt.sequence !== 'number') throw new Error('T3 did not acknowledge thread archival.');
+        try {
+          await archiveThread(endpoint, tab.threadId, projectId);
+        } catch (error) {
+          throw new Error(`${error instanceof Error ? error.message : String(error)} If exiting Runner, T3 thread ${tab.threadId} may need manual archival after restart.`, { cause: error });
         }
       }
       handles.delete(handle);

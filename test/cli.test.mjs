@@ -89,7 +89,9 @@ test('run refuses missing or blank launcher thread before authorization', async 
   }
 });
 
+const unauthorized = Symbol('unauthorized');
 function replyToTool(res, rpc, payload, finishedToolResponses, json) {
+  if (payload === unauthorized) return json({ error: 'invalid_token' }, 401);
   if (payload === undefined) return res.destroy();
   res.once('finish', () => finishedToolResponses.push({ name: rpc.params.name, payload }));
   return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } });
@@ -136,7 +138,9 @@ async function substitute(taskTool = name => assert.fail(`Unexpected T3 tool ${n
         assert.equal(params.get('redirect_uri'), registration.redirect_uris[0]);
         assert.equal(params.get('resource'), endpoint);
         assert.equal(createHash('sha256').update(params.get('code_verifier')).digest('base64url'), authorization.get('code_challenge'));
-        return json({ access_token: token, expires_in: state.expires, token_type: 'Bearer', scope: state.scope });
+        const accessToken = state.replacementToken ?? token;
+        state.authorizations.add(`Bearer ${accessToken}`);
+        return json({ access_token: accessToken, expires_in: state.expires, token_type: 'Bearer', scope: state.scope });
       }
       assert.equal(url.pathname, '/mcp');
       if (state.reject || !state.authorizations.has(req.headers.authorization)) {
@@ -195,6 +199,39 @@ test('adapter acknowledges delivery without a handoff and rejects malformed arch
     assert.deepEqual(history, [`Handoff path: ${handoff}`]);
     assert.equal(archiveRequests, 0);
     await assert.rejects(stat(handoff), { code: 'ENOENT' });
+  } finally { await server.close(); }
+});
+
+test('closure retains ownership across busy work and archive failure, and recognizes confirmed disappearance', async () => {
+  const idle = { threadId: 'task', projectId: 'project', activeRunId: null, archived: false, status: 'completed' };
+  const observations = [
+    ['t3_thread_read', { thread: { ...idle, activeRunId: 'running' } }],
+    ['t3_thread_read', { thread: idle }],
+    ['t3_queue', { items: [{ queuedRunId: 'held' }], nextCursor: null }],
+    ['t3_thread_read', { thread: idle }],
+    ['t3_queue', { items: [], nextCursor: null }],
+    ['t3_thread_read', { thread: { ...idle, status: 'running' } }],
+    ['t3_thread_read', { thread: idle }],
+    ['t3_queue', { items: [], nextCursor: null }],
+    ['t3_thread_read', { thread: idle }],
+    ['t3_thread_organize', { code: 'invalid_request', message: 'Archive refused' }],
+    ['t3_thread_read', { code: 'thread_not_found', message: 'Thread not found' }],
+  ];
+  const server = await substitute((name, args) => {
+    if (name === 't3_thread_read' && args.threadId === 'launcher') return { thread: { threadId: 'launcher', projectId: 'project' } };
+    if (name === 't3_thread_launch') return { threadId: 'task', projectId: 'project', runId: null };
+    assert.equal(args.threadId, 'task');
+    const [expected, response] = observations.shift();
+    assert.equal(name, expected);
+    if (name === 't3_queue') assert.deepEqual(args, { threadId: 'task', action: 'list', limit: 1 });
+    if (name === 't3_thread_organize') assert.deepEqual(args, { threadId: 'task', action: 'archive' });
+    return response;
+  });
+  try {
+    assert.equal((await cli(['auth', 'login', server.endpoint], { approve })).code, 0);
+    const result = await cli([server.endpoint, 'busy', 'busy', 'busy', 'Archive refused'], { entry: fileURLToPath(new URL('./fixtures/close-check.mjs', import.meta.url)) });
+    assert.equal(result.code, 0, result.output);
+    assert.deepEqual(observations, []);
   } finally { await server.close(); }
 });
 
@@ -456,6 +493,10 @@ for (const scenario of scenarios) test(`native task thread: ${scenario.name}`, {
       delivered = saved.invocation.path;
       return recordReceipt({ threadId: id, messageId: 'message-1', runId: 'run-1', status: 'running', delivery: 'started' });
     }
+    if (name === 't3_queue') {
+      assert.deepEqual(args, { threadId: id, action: 'list', limit: 1 });
+      return { items: [], nextCursor: null };
+    }
     if (name === 't3_thread_organize') {
       assert.deepEqual(args, { threadId: id, action: 'archive' });
       const saved = await checkpoint();
@@ -646,6 +687,136 @@ async function waitForOutput(log, pattern, run) {
   }
   assert.fail(`No ${pattern} in output: ${readFileSync(log, 'utf8')}`);
 }
+
+for (const mode of ['create auth loss', 'close auth loss', 'lost archive reply', 'exit after accepted handoff', 'execute auth loss', 'submit auth loss']) test(`Core recovery: ${mode}`, { skip: process.platform === 'win32' }, async () => {
+  const { log, fixture, checkpoint, initialize, runCli } = await coreFixture();
+  const marker = 'Implement the fixture exactly once.';
+  const id = 'owned-task';
+  const projectId = 'project';
+  const history = [];
+  const reads = [];
+  let thread, launchAttempts = 0, sendAttempts = 0, archiveAttempts = 0, child;
+  const server = await substitute(async (name, args, authorization) => {
+    if (name === 't3_thread_read' && args.threadId === 'launcher-thread') {
+      if (mode === 'create auth loss' && !server.state.replacementToken) server.state.authorizations.clear();
+      return { thread: { threadId: 'launcher-thread', projectId } };
+    }
+    if (name === 't3_thread_launch') {
+      launchAttempts++;
+      if (mode === 'execute auth loss') return unauthorized;
+      assert.equal(thread, undefined);
+      if (mode === 'create auth loss') assert.equal(authorization, `Bearer ${server.state.replacementToken}`);
+      thread = { threadId: id, projectId, archived: false, activeRunId: null, status: 'completed', worktreePath: args.workspaceStrategy.worktreePath, title: args.title };
+      return { threadId: id, projectId, runId: null };
+    }
+    assert.equal(args.threadId, id);
+    assert.ok(thread);
+    if (name === 't3_thread_read') {
+      reads.push({ archived: thread.archived, authorization });
+      return { thread };
+    }
+    if (name === 't3_queue') return { items: [], nextCursor: null };
+    if (name === 't3_thread_send') {
+      sendAttempts++;
+      const saved = await checkpoint();
+      assert.equal(saved.roles.implement.sessionid, id);
+      if (sendAttempts === 1) assert.ok(args.message.includes(marker));
+      else assert.equal(args.message, 'continue');
+      if (mode === 'submit auth loss' && sendAttempts === 1) return unauthorized;
+      history.push(args.message);
+      if (mode === 'close auth loss') server.state.authorizations.clear();
+      await writeFile(`${saved.invocation.path}.tmp`, JSON.stringify({ outcome: 'no_change', summary: 'Fixture already satisfied.', commits: [], findings_file: null, pr_title: 'Fixture', pr_body: 'Closes #42' }));
+      await rename(`${saved.invocation.path}.tmp`, saved.invocation.path);
+      return { threadId: id, messageId: 'message', runId: 'run' };
+    }
+    if (name === 't3_thread_organize') {
+      assert.deepEqual(args, { threadId: id, action: 'archive' });
+      archiveAttempts++;
+      const saved = await checkpoint();
+      assert.equal(saved.phase, 'implementation_completed');
+      assert.equal(saved.result.outcome, 'no_change');
+      if (mode === 'exit after accepted handoff') return undefined;
+      thread.archived = true;
+      if (mode === 'lost archive reply') return undefined;
+      return { sequence: 1 };
+    }
+    assert.fail(`Unexpected T3 tool ${name}`);
+  });
+  const start = () => runCli(process => { child = process; });
+  const signIn = async () => {
+    server.state.replacementToken = `replacement-${randomUUID()}`;
+    const result = await cli(['auth', 'login', server.endpoint], { approve });
+    assert.equal(result.code, 0, result.output);
+  };
+  const checkLogin = output => {
+    assert.ok(output.includes(`issue-runner-t3 auth login ${server.endpoint}`), output);
+    assert.ok(!output.includes(server.token));
+  };
+  try {
+    await initialize(server.endpoint, false, marker);
+    let run = start();
+    if (mode === 'submit auth loss') {
+      const rejected = await run;
+      assert.notEqual(rejected.code, 0, rejected.output);
+      checkLogin(rejected.output);
+      assert.equal(history.length, 0);
+      const saved = await checkpoint();
+      assert.equal(saved.roles.implement.sessionid, id);
+      assert.equal(saved.pendingPrompt, undefined);
+      await signIn();
+      run = start();
+    } else if (mode === 'execute auth loss') {
+      await waitForOutput(log, /Command will not be replayed:.*HTTP 401/, run);
+      checkLogin(readFileSync(log, 'utf8'));
+      assert.equal((await checkpoint()).roles.implement?.sessionid, undefined);
+      await signIn();
+      child.stdin.write('q\n');
+      assert.notEqual((await run).code, 0);
+      run = start();
+      await waitForOutput(log, /Enter to restart the entire Issue #42/, run);
+      child.stdin.write('q\n');
+      assert.notEqual((await run).code, 0);
+      assert.equal(launchAttempts, 1);
+      assert.equal(sendAttempts, 0);
+      return;
+    } else {
+      const authLoss = mode.endsWith('auth loss');
+      await waitForOutput(log, authLoss ? /Operation failed:.*HTTP 401/ : /Operation failed:.*t3_thread_organize/, run);
+      if (authLoss) {
+        checkLogin(readFileSync(log, 'utf8'));
+        await signIn();
+      }
+      if (mode !== 'create auth loss') {
+        const saved = await checkpoint();
+        assert.equal(saved.roles.implement.sessionid, id);
+        assert.equal(saved.phase, 'implementation_completed');
+        assert.equal(saved.result.outcome, 'no_change');
+        assert.equal(archiveAttempts, authLoss ? 0 : 1);
+        assert.equal((await fixture()).closed, undefined);
+      } else assert.equal(launchAttempts, 0);
+      if (mode === 'exit after accepted handoff') {
+        assert.match(readFileSync(log, 'utf8'), /owned-task may need manual archival/);
+        child.stdin.write('q\n');
+        assert.notEqual((await run).code, 0);
+        run = start();
+      } else child.stdin.write('\n');
+    }
+    const result = await run;
+    assert.equal(result.code, 0, result.output);
+    assert.equal(launchAttempts, 1);
+    assert.equal(history.length, 1);
+    assert.equal(sendAttempts, mode === 'submit auth loss' ? 2 : 1);
+    assert.equal(archiveAttempts, 1);
+    assert.equal((await fixture()).closed, true);
+    assert.equal(thread.archived, mode !== 'exit after accepted handoff');
+    if (mode === 'lost archive reply') assert.deepEqual(reads.map(read => read.archived), [false, false, true]);
+    if (mode === 'exit after accepted handoff') assert.deepEqual(reads.map(read => read.archived), [false, false]);
+    if (mode === 'close auth loss') assert.ok(reads.every(read => read.authorization === `Bearer ${server.state.replacementToken}`));
+  } finally {
+    child?.kill('SIGTERM');
+    await server.close();
+  }
+});
 
 test('Core Review fix reopens the implementation thread with its history and updated stage title', { skip: process.platform === 'win32' }, async () => {
   const { log, fixture, checkpoint, initialize, runCli, stateFile } = await coreFixture();
