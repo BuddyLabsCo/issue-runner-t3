@@ -33,10 +33,10 @@ async function sameWorktree(saved: string, cwd: string) {
   }
 }
 
-async function call(endpoint: string, name: string, args: Record<string, unknown>) {
-  const result = await callMcp(endpoint, name, args);
+async function call(endpoint: string, name: string, args: Record<string, unknown>, retry?: Parameters<typeof callMcp>[3]) {
+  const result = await callMcp(endpoint, name, args, retry);
   if ('code' in result) {
-    if (result.code === 'thread_not_found') throw new Error('T3 thread not found.');
+    if (!retry && result.code === 'thread_not_found') throw new Error('T3 thread not found.');
     throw new Error(`${name}: ${result.message}`);
   }
   return result;
@@ -113,10 +113,11 @@ export async function createT3Terminal(endpoint: string, launcherId: string): Pr
           const tab = owned(handle);
           tab.options.signal?.throwIfAborted();
           if (!tab.threadId) throw new Error('T3 task handle is not bound to a thread.');
-          const result = await call(endpoint, 't3_thread_send', { threadId: tab.threadId, message, clientRequestId: randomUUID() });
-          if (result.threadId !== tab.threadId || typeof result.messageId !== 'string' || !result.messageId || typeof result.runId !== 'string' || !result.runId) {
-            throw new Error('T3 did not acknowledge message delivery.');
-          }
+          await call(endpoint, 't3_thread_send', { threadId: tab.threadId, message, clientRequestId: randomUUID() }, {
+            acknowledged: result => result.threadId === tab.threadId && typeof result.messageId === 'string' && !!result.messageId && typeof result.runId === 'string' && !!result.runId,
+            uncertainEffect: `The prompt may already have reached T3 thread ${tab.threadId}. Inspect it before continuing; signing in again changes the deduplication scope.`,
+            signal: tab.options.signal,
+          });
         },
       } };
     },
@@ -134,11 +135,12 @@ export async function createT3Terminal(endpoint: string, launcherId: string): Pr
         projectId, title: tab.options.label, modelSelection: startSelection(args),
         workspaceStrategy: { type: 'existing_worktree', worktreePath: tab.options.cwd },
         clientRequestId: randomUUID(),
+      }, {
+        acknowledged: result => typeof result.threadId === 'string' && !!result.threadId.trim() && result.threadId !== launcherId && result.projectId === projectId && result.runId === null,
+        uncertainEffect: 'An idle T3 task thread may already exist. Inspect T3 before continuing; signing in again changes the deduplication scope.',
+        signal: tab.options.signal,
       });
-      if (typeof result.threadId !== 'string' || !result.threadId.trim() || result.threadId === launcherId || result.projectId !== projectId || result.runId !== null) {
-        throw new Error('T3 did not return an idle task thread in the selected project.');
-      }
-      tab.threadId = result.threadId;
+      tab.threadId = result.threadId as string;
       return tab.threadId;
     },
     async closeTab(handle) {

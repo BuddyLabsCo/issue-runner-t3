@@ -89,9 +89,15 @@ test('run refuses missing or blank launcher thread before authorization', async 
   }
 });
 
+function replyToTool(res, rpc, payload, finishedToolResponses, json) {
+  if (payload === undefined) return res.destroy();
+  res.once('finish', () => finishedToolResponses.push({ name: rpc.params.name, payload }));
+  return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } });
+}
+
 async function substitute(taskTool = name => assert.fail(`Unexpected T3 tool ${name}`)) {
   const token = `disposable-${randomUUID()}`;
-  const state = { scope: 'orchestration:read orchestration:operate', expires: 3600, reject: false, reads: 0, readError: false, stallInitialized: false, stalled: 0, completedTools: [] };
+  const state = { scope: 'orchestration:read orchestration:operate', expires: 3600, reject: false, reads: 0, readError: false, stallInitialized: false, stalled: 0, finishedToolResponses: [], authorizations: new Set([`Bearer ${token}`]) };
   let registration, authorization;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, endpoint);
@@ -133,7 +139,7 @@ async function substitute(taskTool = name => assert.fail(`Unexpected T3 tool ${n
         return json({ access_token: token, expires_in: state.expires, token_type: 'Bearer', scope: state.scope });
       }
       assert.equal(url.pathname, '/mcp');
-      if (state.reject || req.headers.authorization !== `Bearer ${token}`) {
+      if (state.reject || !state.authorizations.has(req.headers.authorization)) {
         return json({ error: 'invalid_token', detail: token }, 401);
       }
       if (req.method === 'GET' || req.method === 'DELETE') { res.writeHead(405); return res.end(); }
@@ -147,9 +153,8 @@ async function substitute(taskTool = name => assert.fail(`Unexpected T3 tool ${n
       }
       assert.equal(rpc.method, 'tools/call');
       if (rpc.params.name !== 't3_project_list') {
-        const payload = await taskTool(rpc.params.name, rpc.params.arguments);
-        res.once('finish', () => state.completedTools.push(rpc.params.name));
-        return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } });
+        const payload = await taskTool(rpc.params.name, rpc.params.arguments, req.headers.authorization);
+        return replyToTool(res, rpc, payload, state.finishedToolResponses, json);
       }
       state.reads++;
       if (state.readError) return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify({ error: token }) }] } });
@@ -333,16 +338,185 @@ async function coreFixture() {
     await writeFile(join(project, 'prompts', 'implement.md'), marker);
     await writeFile(join(project, 'prompts', 'review.md'), 'Review the fixture.');
   }
-  const runCli = control => cli(['run', '--project', 'demo', '--issue', '42'], { log, control, env: { T3CODE_THREAD_ID: 'launcher-thread', PATH: `${commands}${delimiter}${process.env.PATH}`, FIXTURE_STATE: stateFile } });
+  const runCli = (control, timeout) => cli(['run', '--project', 'demo', '--issue', '42'], { log, control, timeout, env: { T3CODE_THREAD_ID: 'launcher-thread', PATH: `${commands}${delimiter}${process.env.PATH}`, FIXTURE_STATE: stateFile } });
   return { log, fixture, checkpoint, initialize, runCli, stateFile };
 }
 
-for (const mode of ['normal', 'reject-worktree', 'recover-handoff', 'recover-enter']) test(mode === 'reject-worktree'
-  ? 'a rejected Worktree reaches Core without binding or sending to a thread'
-  : mode === 'normal' ? 'native task thread receives one complete prompt after checkpoint and archives only after accepted handoff'
-    : `fresh CLI resumes interrupted implementation (${mode})`, { skip: process.platform === 'win32' }, async () => {
-  const rejectsWorktree = mode === 'reject-worktree';
-  const recovering = mode.startsWith('recover-');
+const receipt = ['receipt'];
+const lostReplies = ['drop', 'malformed', 'receipt'];
+const exhausted = ['drop', 'drop', 'drop'];
+const retryExhausted = /Retry budget exhausted after 3 attempts/;
+const signInWarning = /signing in again changes the deduplication scope/;
+const scenarios = [
+  { name: 'normal', launch: receipt, send: receipt, threads: 1, messages: 1 },
+  { name: 'reject launch', launch: ['reject'], send: [], threads: 0, messages: 0, errors: [/worktreePath must be one of the project's git worktrees/] },
+  { name: 'lost replies', launch: lostReplies, send: lostReplies, threads: 1, messages: 1, rotateCredential: true },
+  { name: 'reject send', launch: receipt, send: ['reject'], threads: 1, messages: 0, errors: [/Thread cannot receive messages/] },
+  { name: 'exhaust launch', launch: exhausted, send: [], threads: 1, messages: 0, errors: [retryExhausted, signInWarning, /idle T3 task thread may already exist/] },
+  { name: 'exhaust send', launch: receipt, send: ['drop', 'drop', 'orchestration_error'], threads: 1, messages: 1, errors: [retryExhausted, signInWarning, /Accepted without a durable projection/, /prompt may already have reached T3 thread native-task-thread/] },
+  { name: 'thread missing after lost send reply', launch: receipt, send: ['drop', 'not_found'], threads: 1, messages: 1, errors: [/Thread not found/, signInWarning, /prompt may already have reached T3 thread native-task-thread/] },
+  { name: 'orchestration error on launch', launch: ['orchestration_error', 'receipt'], send: receipt, threads: 1, messages: 1 },
+  { name: 'orchestration error on send', launch: receipt, send: ['orchestration_error', 'receipt'], threads: 1, messages: 1 },
+];
+
+for (const scenario of scenarios) test(`native task thread: ${scenario.name}`, { skip: process.platform === 'win32' }, async () => {
+  const { log, fixture, checkpoint, initialize, runCli } = await coreFixture();
+  const launcher = 'launcher-thread';
+  const id = 'native-task-thread';
+  const projectId = 'launcher-project';
+  const marker = 'Entire user prompt.\n\nSecond line with Unicode: 雪.';
+  const history = [];
+  let launched, archived = false, pending, delivered, accepted, launcherReads;
+  const attempts = { t3_thread_launch: [], t3_thread_send: [] };
+  const replies = { t3_thread_launch: scenario.launch, t3_thread_send: scenario.send };
+  const receipts = new Map();
+  const plannedReply = (reply, receipt) => {
+    switch (reply) {
+      case 'drop': return undefined;
+      case 'malformed': return {};
+      case 'not_found': return { code: 'thread_not_found', message: 'Thread not found' };
+      case 'orchestration_error': return { _tag: 'OrchestratorMcpFailure', code: 'orchestration_error', message: 'Accepted without a durable projection.' };
+      case 'receipt': return receipt;
+      default: assert.fail(`Unexpected reply ${reply}`);
+    }
+  };
+  const assertRetryIdentity = () => {
+    const ids = new Set();
+    for (const calls of Object.values(attempts)) {
+      if (!calls.length) continue;
+      const first = calls[0];
+      assert.match(first.args.clientRequestId, /^[0-9a-f-]{36}$/);
+      assert.ok(!ids.has(first.args.clientRequestId), 'Every logical operation needs a fresh request ID');
+      ids.add(first.args.clientRequestId);
+      for (let i = 1; i < calls.length; i++) {
+        assert.deepEqual(calls[i].args, first.args);
+        assert.equal(calls[i].authorization, first.authorization);
+        assert.ok(calls[i].time - calls[i - 1].time >= 5000, 'Retry must wait five seconds');
+      }
+    }
+  };
+  // Model a new sign-in replacing the saved credential while a logical operation is in flight.
+  const replaceCredential = async () => {
+    const store = join(home, '.issue-runner-t3');
+    const [file] = await readdir(store);
+    const path = join(store, file);
+    const credential = JSON.parse(await readFile(path, 'utf8'));
+    const accessToken = `replacement-${randomUUID()}`;
+    server.state.authorizations.add(`Bearer ${accessToken}`);
+    await writeFile(path, JSON.stringify({ ...credential, accessToken }));
+  };
+  const server = await substitute(async (name, args, authorization) => {
+    const requestKey = `${authorization}:${args.clientRequestId}`;
+    let reply;
+    if (name in attempts) {
+      const calls = attempts[name];
+      reply = replies[name][calls.length];
+      calls.push({ args, authorization, time: performance.now() });
+      assert.ok(reply, `Unexpected ${name} attempt ${calls.length}`);
+      if (receipts.has(requestKey)) return plannedReply(reply, receipts.get(requestKey));
+    }
+    const recordReceipt = async receipt => {
+      receipts.set(requestKey, receipt);
+      if (scenario.rotateCredential) await replaceCredential();
+      return plannedReply(reply, receipt);
+    };
+    if (name === 't3_thread_read') {
+      if (args.threadId === launcher) {
+        launcherReads = server.state.reads;
+        return { thread: { threadId: launcher, projectId } };
+      }
+      assert.equal(args.threadId, id);
+      return { thread: { threadId: id, projectId, archived, activeRunId: null, status: 'completed' }, recentRuns: [], items: history };
+    }
+    if (name === 't3_thread_launch') {
+      assert.equal(launched, undefined);
+      assert.ok(server.state.reads > launcherReads, 'Tab creation must authorize after launcher resolution');
+      assert.equal(args.projectId, projectId);
+      assert.equal(args.title, 'issue-42 implement');
+      assert.deepEqual(args.modelSelection, { instanceId: 'codex-instance', model: 'fixture-model', options: [{ id: 'reasoningEffort', value: 'high' }] });
+      assert.deepEqual(args.workspaceStrategy, { type: 'existing_worktree', worktreePath: (await fixture()).worktree });
+      assert.ok(!('message' in args));
+      launched = args;
+      if (reply === 'reject') return { _tag: 'OrchestratorMcpFailure', code: 'invalid_request', message: `worktreePath must be one of the project's git worktrees. ${server.token}` };
+      return recordReceipt({ threadId: id, projectId, modelSelection: args.modelSelection, runId: null, status: null });
+    }
+    if (name === 't3_thread_send') {
+      const liveOutput = readFileSync(log, 'utf8');
+      assert.equal(args.threadId, id);
+      assert.equal(history.length, 0);
+      const saved = await checkpoint();
+      assert.equal(saved.roles.implement.sessionid, id);
+      assert.equal(saved.phase, 'implementing');
+      assert.ok(liveOutput.includes(`Issue #42 implement sessionid=${id} handoff=${saved.invocation.path}`), liveOutput);
+      const template = await readFile(join(root, 'install', 'lib', 'node_modules', 'issue-runner-t3', 'node_modules', 'issue-runner-core', 'prompts', 'implement.md'), 'utf8');
+      assert.equal(args.message, template.trimEnd().replace('{{issue}}', '42').replace('{{instructions}}', marker).replace('{{path}}', JSON.stringify(saved.invocation.path)));
+      assert.equal(saved.probe, undefined);
+      if (reply === 'reject') return { _tag: 'OrchestratorMcpFailure', code: 'thread_not_sendable', message: 'Thread cannot receive messages.' };
+      history.push(args.message);
+      delivered = saved.invocation.path;
+      return recordReceipt({ threadId: id, messageId: 'message-1', runId: 'run-1', status: 'running', delivery: 'started' });
+    }
+    if (name === 't3_thread_organize') {
+      assert.deepEqual(args, { threadId: id, action: 'archive' });
+      const saved = await checkpoint();
+      assert.equal(saved.phase, 'implementation_completed');
+      assert.equal(saved.result.outcome, 'no_change');
+      accepted = saved;
+      archived = true;
+      return { sequence: 1 };
+    }
+    assert.fail(`Unexpected T3 tool ${name}`);
+  });
+  try {
+    await initialize(server.endpoint, false, marker);
+    const run = runCli(undefined, 60_000);
+    if (!scenario.errors) {
+      // Observe the pending checkpoint after the server finishes sending a valid receipt, before Agent completion.
+      const deadline = Date.now() + 40_000;
+      const validSendResponseFinished = () => server.state.finishedToolResponses.some(({ name, payload }) =>
+        name === 't3_thread_send' && payload.threadId === id && payload.messageId === 'message-1' && payload.runId === 'run-1');
+      while (!validSendResponseFinished() && Date.now() < deadline) {
+        const early = await Promise.race([run, new Promise(resolve => setTimeout(resolve, 100))]);
+        assert.equal(early, undefined, early?.output);
+      }
+      assert.ok(delivered && validSendResponseFinished(), 'No valid send receipt finished');
+      await assert.rejects(stat(delivered), { code: 'ENOENT' });
+      pending = await checkpoint();
+      assert.equal(pending.phase, 'implementing');
+      assert.equal(pending.result, undefined);
+      assert.equal(archived, false);
+      assert.equal((await fixture()).closed, undefined);
+      await writeFile(`${delivered}.tmp`, JSON.stringify({ outcome: 'no_change', summary: 'Fixture already satisfied.', commits: [], findings_file: null, pr_title: 'Fixture', pr_body: 'Closes #42' }));
+      await rename(`${delivered}.tmp`, delivered);
+    }
+    const result = await run;
+    assertRetryIdentity();
+    assert.deepEqual(Object.values(attempts).map(calls => calls.length), [scenario.launch.length, scenario.send.length]);
+    assert.equal(history.length, scenario.messages);
+    assert.equal(receipts.size, scenario.threads + scenario.messages);
+    assert.ok(launched);
+    assert.ok(!result.output.includes(server.token));
+    if (scenario.errors) {
+      assert.notEqual(result.code, 0, result.output);
+      for (const error of scenario.errors) assert.match(result.output, error);
+      assert.equal(retryExhausted.test(result.output), scenario.errors.includes(retryExhausted));
+      assert.equal((await checkpoint()).roles.implement?.sessionid, scenario.send.length ? id : undefined);
+      assert.equal(archived, false);
+      assert.equal((await fixture()).closed, undefined);
+      return;
+    }
+    assert.equal(result.code, 0, result.output);
+    assert.ok(result.output.includes(`Issue #42 implement sessionid=${id} handoff=${delivered}`), result.output);
+    if (scenario.rotateCredential) {
+      assert.equal(attempts.t3_thread_launch[0].authorization, `Bearer ${server.token}`);
+      assert.equal(attempts.t3_thread_send[0].authorization, [...server.state.authorizations][1]);
+    }
+    assert.ok(archived && accepted);
+    assert.equal((await fixture()).closed, true);
+  } finally { await server.close(); }
+});
+
+for (const mode of ['recover-handoff', 'recover-enter']) test(`fresh CLI resumes interrupted implementation (${mode})`, { skip: process.platform === 'win32' }, async () => {
   const { log, fixture, checkpoint, initialize, runCli } = await coreFixture();
   const launcher = 'launcher-thread';
   const id = 'native-task-thread';
@@ -369,7 +543,6 @@ for (const mode of ['normal', 'reject-worktree', 'recover-handoff', 'recover-ent
       assert.deepEqual(args.workspaceStrategy, { type: 'existing_worktree', worktreePath: (await fixture()).worktree });
       assert.ok(!('message' in args));
       launched = args;
-      if (rejectsWorktree) return { _tag: 'OrchestratorMcpFailure', code: 'invalid_request', message: `worktreePath must be one of the project's git worktrees. ${server.token}` };
       return { threadId: id, projectId, modelSelection: args.modelSelection, runId: null, status: null };
     }
     if (name === 't3_queue') {
@@ -405,57 +578,46 @@ for (const mode of ['normal', 'reject-worktree', 'recover-handoff', 'recover-ent
   let child;
   try {
     await initialize(server.endpoint, false, marker);
-    let run = runCli(recovering ? process => { child = process; } : undefined);
-    if (rejectsWorktree) {
-      const result = await run;
-      assert.notEqual(result.code, 0, result.output);
-      assert.match(result.output, /worktreePath must be one of the project's git worktrees/);
-      assert.ok(!result.output.includes(server.token));
-      assert.ok(launched);
-      assert.equal((await checkpoint()).roles.implement, undefined);
-      assert.equal(history.length, 0);
-      assert.equal(archived, false);
-      return;
-    }
+    let run = runCli(process => { child = process; });
     // Observe the acknowledged prompt's pending checkpoint before simulating Agent completion.
     const deadline = Date.now() + 15_000;
-    while (!server.state.completedTools.includes('t3_thread_send') && Date.now() < deadline) {
+    const validSendResponseFinished = () => server.state.finishedToolResponses.some(({ name, payload }) =>
+      name === 't3_thread_send' && payload.threadId === id && payload.messageId === 'message-1' && payload.runId === 'run-1');
+    while (!validSendResponseFinished() && Date.now() < deadline) {
       const early = await Promise.race([run, new Promise(resolve => setTimeout(resolve, 100))]);
       assert.equal(early, undefined, early?.output);
     }
-    assert.ok(delivered && server.state.completedTools.includes('t3_thread_send'), 'No task prompt acknowledged');
+    assert.ok(delivered && validSendResponseFinished(), 'No task prompt acknowledged');
     await assert.rejects(stat(delivered), { code: 'ENOENT' });
     pending = await checkpoint();
     assert.equal(pending.phase, 'implementing');
     assert.equal(pending.result, undefined);
     assert.equal(archived, false);
     assert.equal((await fixture()).closed, undefined);
-    if (recovering) {
-      child.kill('SIGTERM');
-      assert.notEqual((await run).code, 0);
-      busy = true;
+    child.kill('SIGTERM');
+    assert.notEqual((await run).code, 0);
+    busy = true;
+    run = runCli(process => { child = process; });
+    await waitForOutput(log, /Press q to exit.*Enter would advance/, run);
+    assert.match(readFileSync(log, 'utf8'), /finish or stop the turn in T3, then rerun the same command/i);
+    child.stdin.write('q\n');
+    const failed = await run;
+    assert.notEqual(failed.code, 0, failed.output);
+    assert.equal(taskReads, 1);
+    assert.equal(history.length, 1);
+    assert.equal(archived, false);
+    assert.equal((await checkpoint()).roles.implement.sessionid, id);
+    busy = false;
+    if (mode === 'recover-enter') {
       run = runCli(process => { child = process; });
       await waitForOutput(log, /Press q to exit.*Enter would advance/, run);
-      assert.match(readFileSync(log, 'utf8'), /finish or stop the turn in T3, then rerun the same command/i);
-      child.stdin.write('q\n');
-      const failed = await run;
-      assert.notEqual(failed.code, 0, failed.output);
-      assert.equal(taskReads, 1);
-      assert.equal(history.length, 1);
-      assert.equal(archived, false);
-      assert.equal((await checkpoint()).roles.implement.sessionid, id);
-      busy = false;
-      if (mode === 'recover-enter') {
-        run = runCli(process => { child = process; });
-        await waitForOutput(log, /Press q to exit.*Enter would advance/, run);
-        assert.equal(taskReads, 1, 'Saved pause must precede retry');
-        child.stdin.write('\n');
-        await waitForOutput(log, /handoff=/, run);
-        const deadline = Date.now() + 10_000;
-        while (history.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
-        assert.equal(history.length, 2);
-        assert.equal(taskReads, 3);
-      }
+      assert.equal(taskReads, 1, 'Saved pause must precede retry');
+      child.stdin.write('\n');
+      await waitForOutput(log, /handoff=/, run);
+      const deadline = Date.now() + 10_000;
+      while (history.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+      assert.equal(history.length, 2);
+      assert.equal(taskReads, 3);
     }
     await writeFile(`${delivered}.tmp`, JSON.stringify({ outcome: 'no_change', summary: 'Fixture already satisfied.', commits: [], findings_file: null, pr_title: 'Fixture', pr_body: 'Closes #42' }));
     await rename(`${delivered}.tmp`, delivered);
