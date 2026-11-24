@@ -1,0 +1,26 @@
+{
+  "name": "issue-runner-t3",
+  "version": "0.1.0",
+  "description": "Issue Runner for T3 Code",
+  "type": "module",
+  "license": "MIT",
+  "bin": { "issue-runner-t3": "dist/cli.js" },
+  "files": ["dist"],
+  "engines": { "node": ">=22.18.0", "npm": ">=11" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run build",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "issue-runner-core": "1.0.10",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "open": "11.0.4",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.3"
+  }
+}
