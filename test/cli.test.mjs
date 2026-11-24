@@ -196,14 +196,18 @@ test('adapter acknowledges delivery without a handoff and rejects malformed arch
 test('exact resume validates the saved thread before unarchive, rename or input', async () => {
   const original = { threadId: 'saved-thread', projectId: 'project', worktreePath: launch, title: 'issue-42 implement', archived: true, activeRunId: null, status: 'completed', model: 'original-model' };
   const history = ['Implementation context'];
-  let thread, calls, queued = false, renameDenied = false;
+  let thread, calls, afterQueueRead, queued = false, renameDenied = false;
   const server = await substitute((name, args) => {
     if (name === 't3_thread_read' && args.threadId === 'launcher') return { thread: { threadId: 'launcher', projectId: 'project' } };
-    assert.equal(args.threadId, 'saved-thread');
     calls.push(name);
+    assert.equal(args.threadId, 'saved-thread');
     if (name === 't3_thread_read') return thread ? { thread, recentRuns: [], items: history } : { code: 'thread_not_found', message: 'Thread not found' };
     if (name === 't3_queue') {
       assert.deepEqual(args, { threadId: 'saved-thread', action: 'list', limit: 1 });
+      if (afterQueueRead !== undefined) {
+        queued = false;
+        thread = afterQueueRead && { ...thread, ...afterQueueRead };
+      }
       return { items: queued ? [{ queuedRunId: 'older-queued-run', text: 'Pending', truncated: false }] : [], nextCursor: null };
     }
     if (name === 't3_thread_organize') {
@@ -256,13 +260,30 @@ test('exact resume validates the saved thread before unarchive, rename or input'
     assert.equal(held.code, 0, held.output);
     assert.deepEqual(calls, ['t3_thread_read', 't3_queue']);
     assert.deepEqual(history, ['Implementation context']);
+    for (const [change, error] of [
+      [{ activeRunId: 'older-queued-run', status: 'running' }, 'finish or stop'],
+      [null, 'not found'],
+      [{ threadId: 'different' }, 'identity'],
+      [{ projectId: 'different' }, 'project'],
+      [{ worktreePath: home }, 'worktree'],
+    ]) {
+      thread = { ...original, archived: false };
+      queued = change?.status === 'running';
+      afterQueueRead = change;
+      calls = [];
+      const changed = await resume(error);
+      assert.equal(changed.code, 0, changed.output);
+      assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_read']);
+      assert.deepEqual(history, ['Implementation context']);
+    }
+    afterQueueRead = undefined;
     queued = false;
     thread = { ...original };
     renameDenied = true;
     calls = [];
     const rejected = await resume('rename rejected');
     assert.equal(rejected.code, 0, rejected.output);
-    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_organize', 't3_thread_update']);
+    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_read', 't3_thread_organize', 't3_thread_update']);
     assert.deepEqual(history, ['Implementation context']);
     renameDenied = false;
     const alias = join(home, 'worktree-alias');
@@ -271,12 +292,12 @@ test('exact resume validates the saved thread before unarchive, rename or input'
     calls = [];
     const result = await resume();
     assert.equal(result.code, 0, result.output);
-    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_organize', 't3_thread_update', 't3_thread_send']);
+    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_read', 't3_thread_organize', 't3_thread_update', 't3_thread_send']);
     assert.deepEqual(history, ['Implementation context', 'Review fix']);
     calls = [];
     const unchanged = await resume();
     assert.equal(unchanged.code, 0, unchanged.output);
-    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_send']);
+    assert.deepEqual(calls, ['t3_thread_read', 't3_queue', 't3_thread_read', 't3_thread_send']);
   } finally { await server.close(); }
 });
 
@@ -433,7 +454,7 @@ for (const mode of ['normal', 'reject-worktree', 'recover-handoff', 'recover-ent
         const deadline = Date.now() + 10_000;
         while (history.length < 2 && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
         assert.equal(history.length, 2);
-        assert.equal(taskReads, 2);
+        assert.equal(taskReads, 3);
       }
     }
     await writeFile(`${delivered}.tmp`, JSON.stringify({ outcome: 'no_change', summary: 'Fixture already satisfied.', commits: [], findings_file: null, pr_title: 'Fixture', pr_body: 'Closes #42' }));
