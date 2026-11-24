@@ -88,9 +88,16 @@ test('run refuses missing or blank launcher thread before authorization', async 
   }
 });
 
+function replyToTool(res, rpc, payload, completedTools) {
+  if (payload === undefined) return res.destroy();
+  res.once('finish', () => completedTools.push(rpc.params.name));
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } }));
+}
+
 async function substitute(taskTool = name => assert.fail(`Unexpected T3 tool ${name}`)) {
   const token = `disposable-${randomUUID()}`;
-  const state = { scope: 'orchestration:read orchestration:operate', expires: 3600, reject: false, reads: 0, readError: false, stallInitialized: false, stalled: 0, completedTools: [] };
+  const state = { scope: 'orchestration:read orchestration:operate', expires: 3600, reject: false, reads: 0, readError: false, stallInitialized: false, stalled: 0, completedTools: [], authorizations: new Set([`Bearer ${token}`]) };
   let registration, authorization;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, endpoint);
@@ -132,7 +139,7 @@ async function substitute(taskTool = name => assert.fail(`Unexpected T3 tool ${n
         return json({ access_token: token, expires_in: state.expires, token_type: 'Bearer', scope: state.scope });
       }
       assert.equal(url.pathname, '/mcp');
-      if (state.reject || req.headers.authorization !== `Bearer ${token}`) {
+      if (state.reject || !state.authorizations.has(req.headers.authorization)) {
         return json({ error: 'invalid_token', detail: token }, 401);
       }
       if (req.method === 'GET' || req.method === 'DELETE') { res.writeHead(405); return res.end(); }
@@ -146,9 +153,8 @@ async function substitute(taskTool = name => assert.fail(`Unexpected T3 tool ${n
       }
       assert.equal(rpc.method, 'tools/call');
       if (rpc.params.name !== 't3_project_list') {
-        const payload = await taskTool(rpc.params.name, rpc.params.arguments);
-        res.once('finish', () => state.completedTools.push(rpc.params.name));
-        return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } });
+        const payload = await taskTool(rpc.params.name, rpc.params.arguments, req.headers.authorization);
+        return replyToTool(res, rpc, payload, state.completedTools);
       }
       state.reads++;
       if (state.readError) return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify({ error: token }) }] } });
@@ -192,9 +198,10 @@ test('adapter acknowledges delivery without a handoff and rejects malformed arch
   } finally { await server.close(); }
 });
 
-for (const rejectsWorktree of [false, true]) test(rejectsWorktree
-  ? 'a rejected Worktree reaches Core without binding or sending to a thread'
-  : 'native task thread receives one complete prompt after checkpoint and archives only after accepted handoff', { skip: process.platform === 'win32' }, async () => {
+for (const scenario of ['normal', 'reject launch', 'lost replies', 'reject send', 'exhaust launch', 'exhaust send']) test(`native task thread: ${scenario}`, { skip: process.platform === 'win32' }, async () => {
+  const rejectsWorktree = scenario === 'reject launch';
+  const losesReplies = scenario === 'lost replies';
+  const exhaustedTool = scenario === 'exhaust launch' ? 't3_thread_launch' : scenario === 'exhaust send' ? 't3_thread_send' : undefined;
   const project = join(launch, 'demo');
   const checkout = join(launch, 'checkout');
   const commands = join(launch, 'commands');
@@ -220,7 +227,44 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
   const marker = 'Entire user prompt.\n\nSecond line with Unicode: 雪.';
   const history = [];
   let launched, archived = false, pending, delivered, accepted, launcherReads;
-  const server = await substitute(async (name, args) => {
+  const attempts = { t3_thread_launch: [], t3_thread_send: [] };
+  const receipts = new Map();
+  const assertRetryIdentity = () => {
+    const ids = new Set();
+    for (const calls of Object.values(attempts)) {
+      if (!calls.length) continue;
+      const first = calls[0];
+      assert.match(first.args.clientRequestId, /^[0-9a-f-]{36}$/);
+      assert.ok(!ids.has(first.args.clientRequestId), 'Every logical operation needs a fresh request ID');
+      ids.add(first.args.clientRequestId);
+      for (let i = 1; i < calls.length; i++) {
+        assert.deepEqual(calls[i].args, first.args);
+        assert.equal(calls[i].authorization, first.authorization);
+        assert.ok(calls[i].time - calls[i - 1].time >= 5000, 'Retry must wait five seconds');
+      }
+    }
+  };
+  // Model a new sign-in replacing the saved credential while a logical operation is in flight.
+  const replaceCredential = async () => {
+    const store = join(home, '.issue-runner-t3');
+    const [file] = await readdir(store);
+    const path = join(store, file);
+    const credential = JSON.parse(await readFile(path, 'utf8'));
+    const accessToken = `replacement-${randomUUID()}`;
+    server.state.authorizations.add(`Bearer ${accessToken}`);
+    await writeFile(path, JSON.stringify({ ...credential, accessToken }));
+  };
+  const server = await substitute(async (name, args, authorization) => {
+    const requestKey = `${authorization}:${args.clientRequestId}`;
+    if (name in attempts) {
+      const calls = attempts[name];
+      calls.push({ args, authorization, time: performance.now() });
+      if (receipts.has(requestKey)) {
+        if (name === exhaustedTool) return undefined;
+        if (losesReplies && calls.length === 2) return {}; // A reply without an acknowledgment is also uncertain.
+        return receipts.get(requestKey);
+      }
+    }
     if (name === 't3_thread_read') {
       if (args.threadId === launcher) {
         launcherReads = server.state.reads;
@@ -239,7 +283,10 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
       assert.ok(!('message' in args));
       launched = args;
       if (rejectsWorktree) return { _tag: 'OrchestratorMcpFailure', code: 'invalid_request', message: `worktreePath must be one of the project's git worktrees. ${server.token}` };
-      return { threadId: id, projectId, modelSelection: args.modelSelection, runId: null, status: null };
+      const receipt = { threadId: id, projectId, modelSelection: args.modelSelection, runId: null, status: null };
+      receipts.set(requestKey, receipt);
+      if (losesReplies) await replaceCredential();
+      return losesReplies || exhaustedTool === name ? undefined : receipt;
     }
     if (name === 't3_thread_send') {
       const liveOutput = readFileSync(log, 'utf8');
@@ -252,9 +299,13 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
       const template = await readFile(join(root, 'install', 'lib', 'node_modules', 'issue-runner-t3', 'node_modules', 'issue-runner-core', 'prompts', 'implement.md'), 'utf8');
       assert.equal(args.message, template.trimEnd().replace('{{issue}}', '42').replace('{{instructions}}', marker).replace('{{path}}', JSON.stringify(saved.invocation.path)));
       assert.equal(saved.probe, undefined);
+      if (scenario === 'reject send') return { _tag: 'OrchestratorMcpFailure', code: 'thread_not_sendable', message: 'Thread cannot receive messages.' };
       history.push(args.message);
       delivered = saved.invocation.path;
-      return { threadId: id, messageId: 'message-1', runId: 'run-1', status: 'running', delivery: 'started' };
+      const receipt = { threadId: id, messageId: 'message-1', runId: 'run-1', status: 'running', delivery: 'started' };
+      receipts.set(requestKey, receipt);
+      if (losesReplies) await replaceCredential();
+      return losesReplies || exhaustedTool === name ? undefined : receipt;
     }
     if (name === 't3_thread_organize') {
       assert.deepEqual(args, { threadId: id, action: 'archive' });
@@ -277,25 +328,52 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
     config.terminalPlugins.agentStartDelay = 0;
     await writeFile(configPath, stringify(config));
     await writeFile(join(project, 'prompts', 'implement.md'), marker);
-    const run = cli(['run', '--project', 'demo', '--issue', '42'], { log, env: { T3CODE_THREAD_ID: launcher, PATH: `${commands}${delimiter}${process.env.PATH}`, FIXTURE_STATE: stateFile } });
+    const run = cli(['run', '--project', 'demo', '--issue', '42'], { log, timeout: 60_000, env: { T3CODE_THREAD_ID: launcher, PATH: `${commands}${delimiter}${process.env.PATH}`, FIXTURE_STATE: stateFile } });
     if (rejectsWorktree) {
       const result = await run;
+      assertRetryIdentity();
       assert.notEqual(result.code, 0, result.output);
       assert.match(result.output, /worktreePath must be one of the project's git worktrees/);
       assert.ok(!result.output.includes(server.token));
       assert.ok(launched);
       assert.equal((await checkpoint()).roles.implement, undefined);
       assert.equal(history.length, 0);
+      assert.equal(attempts.t3_thread_launch.length, 1);
+      assert.equal(attempts.t3_thread_send.length, 0);
       assert.equal(archived, false);
       return;
     }
+    if (scenario === 'reject send' || exhaustedTool) {
+      const result = await run;
+      assertRetryIdentity();
+      assert.notEqual(result.code, 0, result.output);
+      if (exhaustedTool) {
+        assert.match(result.output, /Retry budget exhausted after 3 attempts/);
+        assert.match(result.output, /signing in again changes the deduplication scope/);
+        assert.match(result.output, exhaustedTool === 't3_thread_launch' ? /idle T3 task thread may already exist/ : /prompt may already have reached T3 thread native-task-thread/);
+        assert.equal(attempts[exhaustedTool].length, 3);
+      } else {
+        assert.match(result.output, /Thread cannot receive messages/);
+        assert.doesNotMatch(result.output, /Retry budget exhausted/);
+        assert.equal(attempts.t3_thread_send.length, 1);
+      }
+      assert.equal(attempts.t3_thread_launch.length, exhaustedTool === 't3_thread_launch' ? 3 : 1);
+      assert.equal(attempts.t3_thread_send.length, exhaustedTool === 't3_thread_launch' ? 0 : exhaustedTool === 't3_thread_send' ? 3 : 1);
+      assert.equal(history.length, exhaustedTool === 't3_thread_send' ? 1 : 0);
+      assert.equal(receipts.size, exhaustedTool === 't3_thread_send' ? 2 : 1);
+      assert.equal((await checkpoint()).roles.implement?.sessionid, exhaustedTool === 't3_thread_launch' ? undefined : id);
+      assert.equal(archived, false);
+      assert.equal((await fixture()).closed, undefined);
+      return;
+    }
     // Observe the acknowledged prompt's pending checkpoint before simulating Agent completion.
-    const deadline = Date.now() + 15_000;
-    while (!server.state.completedTools.includes('t3_thread_send') && Date.now() < deadline) {
+    const deadline = Date.now() + 40_000;
+    const acknowledged = () => server.state.completedTools.filter(name => name === 't3_thread_send').length === (losesReplies ? 2 : 1);
+    while (!acknowledged() && Date.now() < deadline) {
       const early = await Promise.race([run, new Promise(resolve => setTimeout(resolve, 100))]);
       assert.equal(early, undefined, early?.output);
     }
-    assert.ok(delivered && server.state.completedTools.includes('t3_thread_send'), 'No task prompt acknowledged');
+    assert.ok(delivered && acknowledged(), 'No task prompt acknowledged');
     await assert.rejects(stat(delivered), { code: 'ENOENT' });
     pending = await checkpoint();
     assert.equal(pending.phase, 'implementing');
@@ -305,9 +383,17 @@ for (const rejectsWorktree of [false, true]) test(rejectsWorktree
     await writeFile(`${delivered}.tmp`, JSON.stringify({ outcome: 'no_change', summary: 'Fixture already satisfied.', commits: [], findings_file: null, pr_title: 'Fixture', pr_body: 'Closes #42' }));
     await rename(`${delivered}.tmp`, delivered);
     const result = await run;
+    assertRetryIdentity();
     assert.equal(result.code, 0, result.output);
     assert.ok(result.output.includes(`Issue #42 implement sessionid=${id} handoff=${delivered}`), result.output);
     assert.equal(history.length, 1);
+    assert.equal(receipts.size, 2);
+    assert.equal(attempts.t3_thread_launch.length, losesReplies ? 3 : 1);
+    assert.equal(attempts.t3_thread_send.length, losesReplies ? 3 : 1);
+    if (losesReplies) {
+      assert.equal(attempts.t3_thread_launch[0].authorization, `Bearer ${server.token}`);
+      assert.equal(attempts.t3_thread_send[0].authorization, [...server.state.authorizations][1]);
+    }
     assert.ok(archived && accepted);
     assert.equal((await fixture()).closed, true);
   } finally { await server.close(); }
