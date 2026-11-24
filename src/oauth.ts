@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import open from 'open';
-import { operateScope, saveCredential, requireCredential } from './credentials.js';
+import { operateScope, saveCredential } from './credentials.js';
 
 async function oauthPost(url: URL, body: string | URLSearchParams, contentType: string): Promise<Record<string, unknown>> {
   let response: Response;
@@ -80,7 +80,6 @@ export async function login(endpoint: string): Promise<void> {
       throw new Error('T3 returned an invalid token response. Start login again.');
     }
     await saveCredential(endpoint, { accessToken: token.access_token, expiresAt: Date.now() + token.expires_in * 1000, scope: token.scope });
-    await requireCredential(endpoint);
   } finally {
     clearTimeout(timer);
     server.closeAllConnections();

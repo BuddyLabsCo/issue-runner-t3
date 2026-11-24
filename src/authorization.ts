@@ -5,8 +5,14 @@ import { loginCommand, requireCredential } from './credentials.js';
 
 export async function checkAuthorization(endpoint: string): Promise<void> {
   const credential = await requireCredential(endpoint);
+  const deadline = AbortSignal.timeout(10_000);
   const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     requestInit: { headers: { Authorization: `Bearer ${credential.accessToken}` }, redirect: 'error' },
+    // Notifications and transport negotiation do not have MCP request timeouts.
+    fetch: (url, init) => fetch(url, {
+      ...init,
+      signal: init?.signal ? AbortSignal.any([deadline, init.signal]) : deadline,
+    }),
   });
   const client = new Client({ name: 'issue-runner-t3', version: '0.1.0' });
   try {
@@ -24,7 +30,7 @@ export async function checkAuthorization(endpoint: string): Promise<void> {
     if (error instanceof StreamableHTTPError && error.code === 403) {
       throw new Error(`Insufficient access at ${endpoint} (HTTP 403). Run ${loginCommand(endpoint)} and approve operation access.`);
     }
-    throw new Error(`Cannot complete an authenticated MCP read at ${endpoint}. Check that T3 is running and reachable.`);
+    throw new Error(`Cannot complete an authenticated MCP read at ${endpoint}${deadline.aborted ? ': timed out' : ''}. Check that T3 is running and reachable.`);
   } finally {
     await transport.close();
   }

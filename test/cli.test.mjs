@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, mkdir, readFile, readdir, stat, writeFile, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, readdir, stat, writeFile, rm } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { after, before, beforeEach, test } from 'node:test';
+import { parse } from 'yaml';
 
 let root, home, launch, bin;
 before(async () => {
@@ -37,7 +38,7 @@ function cli(args, options = {}) {
       cwd: options.cwd ?? launch,
       env: { ...process.env, HOME: home, USERPROFILE: home, BROWSER: process.execPath },
       stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 30_000,
+      timeout: options.timeout ?? 30_000,
     });
     let output = '';
     let approved = false;
@@ -60,14 +61,17 @@ test('installed CLI offers help and version without credentials', async () => {
   assert.equal(help.code, 0, help.output);
   assert.match(help.output, /auth login/);
   assert.match(help.output, /init --project/);
+  const authHelp = await cli(['auth', '--help']);
+  assert.equal(authHelp.code, 0);
+  assert.match(authHelp.output, /Default MCP URL: http:\/\/127\.0\.0\.1:3773\/mcp/);
   const version = await cli(['--version']);
   assert.equal(version.code, 0, version.output);
   assert.match(version.output, /issue-runner-t3 .*core 1\.0\.10/);
 });
 
-async function substitute(port = 0) {
+async function substitute() {
   const token = `disposable-${randomUUID()}`;
-  const state = { scope: 'orchestration:read orchestration:operate', expires: 3600, reject: false, reads: 0, readError: false };
+  const state = { scope: 'orchestration:read orchestration:operate', expires: 3600, reject: false, reads: 0, readError: false, stallInitialized: false, stalled: 0 };
   let registration, authorization;
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, endpoint);
@@ -117,17 +121,20 @@ async function substitute(port = 0) {
       if (rpc.method === 'initialize') {
         return json({ jsonrpc: '2.0', id: rpc.id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'T3 substitute', version: '0.1.11' } } });
       }
-      if (rpc.method === 'notifications/initialized') { res.writeHead(202); return res.end(); }
+      if (rpc.method === 'notifications/initialized') {
+        if (state.stallInitialized) { state.stalled++; return; }
+        res.writeHead(202); return res.end();
+      }
       assert.equal(rpc.method, 'tools/call');
       assert.equal(rpc.params.name, 't3_project_list');
       state.reads++;
       if (state.readError) return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify({ error: token }) }] } });
-      return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: '{"projects":[],"nextCursor":null}' }], structuredContent: { projects: [], nextCursor: null } } });
+      return json({ jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: '{"projects":[],"nextCursor":null}' }] } });
     } catch (error) {
       json({ error: error.message }, 500);
     }
   });
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const endpoint = `http://127.0.0.1:${server.address().port}/mcp`;
   return { endpoint, token, state, close: () => new Promise(resolve => server.close(resolve)) };
 }
@@ -137,10 +144,15 @@ const approve = async url => {
   assert.equal(response.status, 200);
 };
 
-test('browser login followed by default status and init uses the Core templates', async () => {
-  const server = await substitute(3773);
+test('custom-only browser login, status, and init use the Core templates and retain the endpoint', async () => {
+  const server = await substitute();
   try {
-    const login = await cli(['auth', 'login'], { cwd: home, approve });
+    const initArgs = ['init', '--project', 'authorized', '--mcp-url', `${server.endpoint}/`];
+    const unauthorized = await cli(initArgs);
+    assert.notEqual(unauthorized.code, 0);
+    assert.ok(unauthorized.output.includes(`auth login ${server.endpoint}`), unauthorized.output);
+    await assert.rejects(stat(join(launch, 'authorized')), { code: 'ENOENT' });
+    const login = await cli(['auth', 'login', server.endpoint], { cwd: home, approve });
     assert.equal(login.code, 0, login.output);
     assert.ok(!login.output.includes(server.token));
     const store = join(home, '.issue-runner-t3');
@@ -157,26 +169,31 @@ test('browser login followed by default status and init uses the Core templates'
         $ErrorActionPreference = 'Stop'
         $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
         foreach ($path in @($env:TEST_CREDENTIAL_DIR, $env:TEST_CREDENTIAL_FILE)) {
-          $rules = (Get-Acl -LiteralPath $path).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
+          $acl = Get-Acl -LiteralPath $path
+          if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw 'Credential owner is not the current user' }
+          $rules = $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])
           if ($rules.Count -eq 0 -or @($rules | Where-Object { $_.IdentityReference -ne $sid }).Count -ne 0) { throw 'Credential ACL is not user-only' }
         }
       `], { env: { ...process.env, TEST_CREDENTIAL_DIR: store, TEST_CREDENTIAL_FILE: join(store, file) } });
     }
     const before = await stat(join(store, file));
-    const status = await cli(['auth', 'status']);
+    const status = await cli(['auth', 'status', server.endpoint]);
     assert.equal(status.code, 0, status.output);
-    assert.match(status.output, /Authorized for http:\/\/127\.0\.0\.1:3773\/mcp/);
+    assert.ok(status.output.includes(`Authorized for ${server.endpoint}`));
     assert.equal((await stat(join(store, file))).mtimeMs, before.mtimeMs);
-    const init = await cli(['init', '--project', 'authorized']);
+    const init = await cli(initArgs);
     assert.equal(init.code, 0, init.output);
     assert.ok(!init.output.includes(server.token));
     const template = await readFile(join(root, 'install', 'node_modules', 'issue-runner-core', 'templates', 'config.yaml'), 'utf8');
-    assert.equal(await readFile(join(launch, 'authorized', 'config.yaml'), 'utf8'), template);
+    const expected = parse(template);
+    expected.terminalPlugins.mcpUrl = server.endpoint;
+    const config = await readFile(join(launch, 'authorized', 'config.yaml'), 'utf8');
+    assert.deepEqual(parse(config), expected);
     assert.deepEqual((await readdir(join(launch, 'authorized', 'prompts'))).sort(), ['documentation.md', 'implement.md', 'review.md']);
-    const repeat = await cli(['init', '--project', 'authorized']);
+    const repeat = await cli(initArgs);
     assert.notEqual(repeat.code, 0);
     assert.match(repeat.output, /already exists/);
-    assert.equal(await readFile(join(launch, 'authorized', 'config.yaml'), 'utf8'), template);
+    assert.equal(await readFile(join(launch, 'authorized', 'config.yaml'), 'utf8'), config);
     assert.ok(server.state.reads >= 2);
   } finally { await server.close(); }
 });
@@ -189,6 +206,7 @@ test('missing credentials prevent Core from creating a Project', async () => {
   const status = await cli(['auth', 'status']);
   assert.notEqual(status.code, 0);
   assert.match(status.output, /missing/i);
+  assert.ok(status.output.includes('http://127.0.0.1:3773/mcp'));
   assert.deepEqual(await readdir(home), []);
 });
 
@@ -207,6 +225,49 @@ test('normalized endpoints share credentials and distinct endpoints are isolated
     assert.equal((await cli(['auth', 'status', b.endpoint])).code, 0);
     assert.equal((await readdir(join(home, '.issue-runner-t3'))).length, 2);
   } finally { await a.close(); await b.close(); }
+});
+
+test('status refuses non-private credential directories and files without repairing permissions', async () => {
+  const server = await substitute();
+  try {
+    assert.equal((await cli(['auth', 'login', server.endpoint], { approve })).code, 0);
+    const store = join(home, '.issue-runner-t3');
+    const [file] = await readdir(store);
+    const status = () => cli(['auth', 'status', server.endpoint]);
+    for (const [path, widerMode] of [[store, 0o755], [join(store, file), 0o644]]) {
+      if (process.platform === 'win32') {
+        const ps = (script, env = {}) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; ${script}`], {
+          env: { ...process.env, TEST_CREDENTIAL_PATH: path, ...env }, encoding: 'utf8',
+        }).trim();
+        const acl = () => ps('(Get-Acl -LiteralPath $env:TEST_CREDENTIAL_PATH).Sddl');
+        const original = acl();
+        ps(`$acl = Get-Acl -LiteralPath $env:TEST_CREDENTIAL_PATH
+            $everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+            $acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($everyone, 'Read', 'Allow'))
+            Set-Acl -LiteralPath $env:TEST_CREDENTIAL_PATH -AclObject $acl`);
+        const widened = acl();
+        assert.notEqual(widened, original);
+        const result = await status();
+        assert.notEqual(result.code, 0);
+        assert.match(result.output, /Cannot read private credentials/i);
+        assert.equal(acl(), widened);
+        ps(`$acl = Get-Acl -LiteralPath $env:TEST_CREDENTIAL_PATH
+            $everyone = [System.Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+            $acl.RemoveAccessRuleSpecific([System.Security.AccessControl.FileSystemAccessRule]::new($everyone, 'Read', 'Allow'))
+            Set-Acl -LiteralPath $env:TEST_CREDENTIAL_PATH -AclObject $acl`);
+      } else {
+        const original = (await stat(path)).mode & 0o777;
+        await chmod(path, widerMode);
+        const result = await status();
+        assert.notEqual(result.code, 0);
+        assert.match(result.output, /Cannot read private credentials/i);
+        assert.equal((await stat(path)).mode & 0o777, widerMode);
+        await chmod(path, original);
+      }
+    }
+    assert.equal(server.state.reads, 0);
+    assert.equal((await status()).code, 0);
+  } finally { await server.close(); }
 });
 
 test('status and the command gate report rejected, insufficient, expired, and unreachable access without leaking tokens', async () => {
@@ -240,14 +301,25 @@ test('status and the command gate report rejected, insufficient, expired, and un
     assert.notEqual(authorizedRun.code, 0);
     assert.match(authorizedRun.output, /tracker must be an object/i);
     assert.equal(server.state.reads, reads + 1);
+    const store = join(home, '.issue-runner-t3');
+    const [filename] = await readdir(store);
+    const credentialFile = join(store, filename);
+    const saved = await readFile(credentialFile, 'utf8');
     server.state.scope = 'orchestration:read';
     assert.notEqual((await cli(['auth', 'login', server.endpoint], { approve })).code, 0);
+    assert.equal(await readFile(credentialFile, 'utf8'), saved);
+    assert.equal((await status()).code, 0);
+    await writeFile(credentialFile, JSON.stringify({ ...JSON.parse(saved), scope: 'orchestration:read' }));
     const insufficient = await status();
     assert.notEqual(insufficient.code, 0);
     assert.match(insufficient.output, /insufficient.*orchestration:operate/i);
+    await writeFile(credentialFile, saved);
     server.state.scope = 'orchestration:read orchestration:operate';
     server.state.expires = 0;
     assert.notEqual((await cli(['auth', 'login', server.endpoint], { approve })).code, 0);
+    assert.equal(await readFile(credentialFile, 'utf8'), saved);
+    assert.equal((await status()).code, 0);
+    await writeFile(credentialFile, JSON.stringify({ ...JSON.parse(saved), expiresAt: Date.now() - 1000 }));
     const expired = await run();
     assert.notEqual(expired.code, 0);
     assert.match(expired.output, /expired/i);
@@ -280,5 +352,27 @@ test('the browser callback rejects an incorrect state and does not save a denied
     assert.notEqual(deny.code, 0);
     assert.match(deny.output, /denied/i);
     assert.deepEqual(await readdir(home), []);
+  } finally { await server.close(); }
+});
+
+test('a stalled MCP initialization notification times out before status or init can hang', async () => {
+  const server = await substitute();
+  try {
+    assert.equal((await cli(['auth', 'login', server.endpoint], { approve })).code, 0);
+    server.state.stallInitialized = true;
+    const started = Date.now();
+    const timeout = 20_000;
+    const results = await Promise.all([
+      cli(['auth', 'status', server.endpoint], { timeout }),
+      cli(['init', '--project', 'stalled', '--mcp-url', server.endpoint], { timeout }),
+    ]);
+    assert.equal(server.state.stalled, 2);
+    assert.ok(Date.now() - started < timeout);
+    for (const result of results) {
+      assert.equal(result.code, 1, result.output);
+      assert.match(result.output, /timed out.*reachable/i);
+      assert.ok(!result.output.includes(server.token));
+    }
+    await assert.rejects(stat(join(launch, 'stalled')), { code: 'ENOENT' });
   } finally { await server.close(); }
 });
