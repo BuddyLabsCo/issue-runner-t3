@@ -10,6 +10,7 @@ import { parse, parseDocument } from 'yaml';
 import { checkAuthorization } from './authorization.js';
 import { defaultEndpoint, normalizeEndpoint } from './credentials.js';
 import { login } from './oauth.js';
+import { createT3Terminal } from './terminal.js';
 
 const commandName = 'issue-runner-t3';
 const packageRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -22,7 +23,7 @@ Commands:
   auth login [mcp-url]       Approve access in your browser
   auth status [mcp-url]      Check saved authorization
   init --project <key> [--mcp-url <url>]  Initialize a Core Project
-  run --project <key>        Native task execution (pending issue #11)
+  run --project <key>        Run Issues in native T3 task threads
 
 Options: --help, --version`;
 const authHelp = `Usage: ${commandName} auth <login|status> [mcp-url]\n\nDefault MCP URL: ${defaultEndpoint}`;
@@ -72,6 +73,9 @@ async function main() {
     return;
   }
   if (!['--version', '-v'].includes(args[0]) && !helpRequested) {
+    if (args[0] === 'run' && !process.env.T3CODE_THREAD_ID?.trim()) {
+      throw new Error('Start issue-runner-t3 from a T3 Code integrated terminal.');
+    }
     await checkAuthorization(await projectEndpoint());
   }
   await runCore();
@@ -103,9 +107,9 @@ async function runCore() {
     terminalCliEntry: fileURLToPath(import.meta.url),
     terminal: {
       contractVersion: terminalContractVersion,
-      async createTerminalPlugin() {
-        // Native task threads are implemented separately in issue #11.
-        throw new Error('Native T3 Run support is not available yet (issue #11).');
+      async createTerminalPlugin(config) {
+        const endpoint = normalizeEndpoint((config as { mcpUrl?: unknown }).mcpUrl);
+        return createT3Terminal(endpoint, process.env.T3CODE_THREAD_ID!);
       },
     },
   });
