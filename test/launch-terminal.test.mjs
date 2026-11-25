@@ -11,9 +11,10 @@ const script = fileURLToPath(
     import.meta.url,
   ),
 );
-const substitute = fileURLToPath(
-  new URL("./fixtures/terminal-rpc-substitute.mjs", import.meta.url),
-);
+const substitute = new URL(
+  "./fixtures/terminal-rpc-substitute.mjs",
+  import.meta.url,
+).href;
 
 async function fixture(t) {
   const root = await mkdtemp(resolve(".test-terminal-"));

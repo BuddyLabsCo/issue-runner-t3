@@ -46,7 +46,8 @@ before(async () => {
   npm([
     "install",
     "--global",
-    "--offline",
+    // npm ci can cache tarballs without caching dependency metadata.
+    "--prefer-offline",
     "--ignore-scripts",
     "--no-audit",
     "--no-fund",
