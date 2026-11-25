@@ -1,58 +1,15 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { basename } from "node:path";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 
-// Simulate only the disposable Issue and Git evidence Core needs. Unexpected commands fail closed.
+// Simulate the disposable GitHub Issue. Unexpected commands fail closed.
 const file = process.env.FIXTURE_STATE;
 const state = JSON.parse(readFileSync(file, "utf8"));
 const save = () => writeFileSync(file, JSON.stringify(state));
 const args = process.argv.slice(2);
-const base = "a".repeat(40);
 const [tool] = basename(process.argv[1]).split(".");
-if (tool === "git") {
-  if (args[0] === "-c") args.splice(0, 2);
-  if (args[0] === "fetch") {
-    assert.equal(process.cwd(), state.checkout);
-    assert.deepEqual(args, ["fetch", "--no-tags", "origin", "main"]);
-  } else if (args.join(" ") === "rev-parse FETCH_HEAD") console.log(base);
-  else if (args[0] === "worktree" && args[1] === "add") {
-    assert.equal(process.cwd(), state.checkout);
-    assert.equal(args[5], base);
-    state.branch = args[3];
-    state.worktree = args[4];
-    mkdirSync(state.worktree, { recursive: true });
-    save();
-  } else if (args.join(" ") === "rev-parse --show-toplevel")
-    console.log(process.cwd());
-  else if (args.join(" ") === "rev-parse HEAD")
-    console.log(state.commits?.at(-1)?.sha ?? base);
-  else if (args.join(" ") === "branch --show-current")
-    console.log(state.branch);
-  else if (args[0] === "merge-base") {
-    assert.ok(
-      args[1] === base ||
-        state.commits?.some((commit) => commit.sha === args[1]),
-    );
-    console.log(args[1]);
-  } else if (args[0] === "log") {
-    const commits = state.commits ?? [];
-    const from = args.at(-1).split("..")[0];
-    assert.ok(from === base || commits.some((commit) => commit.sha === from));
-    for (const commit of commits.slice(
-      commits.findIndex((commit) => commit.sha === from) + 1,
-    ))
-      console.log(`${commit.sha}\0${commit.message}`);
-  } else if (args[0] === "diff" && state.commits?.length)
-    console.log("fixture.txt");
-  else if (
-    ["status", "diff", "check-ref-format", "for-each-ref"].includes(args[0])
-  ) {
-    // No changes or refs in the fixture.
-  } else if (args[0] === "worktree" && args[1] === "list") {
-    // No additional worktrees in the fixture.
-  } else assert.fail(`Unexpected git command: ${args.join(" ")}`);
-} else if (tool === "gh") {
+if (tool === "gh") {
   const viewer = { __typename: "User", id: "U1", login: "runner" };
   const repo = { id: "R1", nameWithOwner: "fixture/repo" };
   const reservation = { id: "L1", name: "fixture:reserved" };
