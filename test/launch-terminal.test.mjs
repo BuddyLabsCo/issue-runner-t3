@@ -17,8 +17,8 @@ async function fixture(t) {
   await mkdir(join(root, 'userdata'));
   await writeFile(join(root, 'userdata', 'server-runtime.json'), JSON.stringify({ origin: 'http://127.0.0.1:4242' }));
   const log = join(root, 'rpc.log');
-  const run = (args, mode = '') => spawnSync(process.execPath, ['--import', substitute, script, 'current-thread', launch, 'demo', ...args], {
-    env: { ...process.env, T3CODE_HOME: root, RPC_LOG: log, RPC_MODE: mode }, encoding: 'utf8', timeout: 5000,
+  const run = (args, mode = '', platform = '') => spawnSync(process.execPath, ['--import', substitute, script, 'current-thread', launch, 'demo', ...args], {
+    env: { ...process.env, T3CODE_HOME: root, RPC_LOG: log, RPC_MODE: mode, RPC_PLATFORM: platform }, encoding: 'utf8', timeout: 5000,
   });
   return { launch, run, calls: async () => (await readFile(log, 'utf8')).trim().split('\n').map(JSON.parse) };
 }
@@ -62,6 +62,17 @@ test('skill launcher supports every Runner selector', async t => {
       assert.equal(result.status, 0, result.stderr);
       const write = (await calls()).find(call => call.tag === 'terminal.write');
       assert.equal(write.payload.data, `issue-runner-t3 run --project=demo ${selector.join(' ')}\r`);
+    });
+  }
+});
+
+test('skill launcher sends the same Runner command on each operating system', async t => {
+  for (const platform of ['linux', 'darwin', 'win32']) {
+    await t.test(platform, async t => {
+      const { run, calls } = await fixture(t);
+      const result = run(['--issue', '42'], '', platform);
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal((await calls()).find(call => call.tag === 'terminal.write').payload.data, 'issue-runner-t3 run --project=demo --issue 42\r');
     });
   }
 });

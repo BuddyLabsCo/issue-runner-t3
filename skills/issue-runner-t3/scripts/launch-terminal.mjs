@@ -75,7 +75,7 @@ async function main() {
 
   const t3 = args => execFileSync('t3', args, {
     encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000,
-    env: { ...process.env, T3CODE_HOME: baseDir }, shell: process.platform === 'win32',
+    cwd: baseDir, env: { ...process.env, T3CODE_HOME: baseDir }, shell: process.platform === 'win32',
   });
   try { t3(['thread', 'show', threadId, '--json', '--messages', '0']); }
   catch { throw new Error('Cannot find the current thread on the local T3 Server.'); }

@@ -66,7 +66,7 @@ Confirm the requested work. Use read-only tracker queries to verify Issues and P
 
 If the operator requests manual PR review, add `--no-auto-merge` (only for a single numbered `--issue` or `--document`).
 
-Show the Runner command and clickable absolute file links to `config.yaml` and the User Prompts used by this Run. After the operator approves, invoke the Skill's [terminal launcher](scripts/launch-terminal.mjs) with the shell-quoted parameters and selector:
+Show the Runner command (`issue-runner-t3 run --project=<projectKey> <selector> [--no-auto-merge]`) and clickable absolute file links to `config.yaml` and the User Prompts used by this Run. After the operator approves, invoke the Skill's [terminal launcher](scripts/launch-terminal.mjs) with the shell-quoted parameters and selector:
 
 ```text
 node <skill-directory>/scripts/launch-terminal.mjs <threadId> <launchDirectory> <projectKey> <selector> [--no-auto-merge]

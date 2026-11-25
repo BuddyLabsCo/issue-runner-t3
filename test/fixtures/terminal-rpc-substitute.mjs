@@ -2,12 +2,17 @@ import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import 'node:path';
+import 'node:os';
 
 const record = value => appendFileSync(process.env.RPC_LOG, `${JSON.stringify(value)}\n`);
 const mode = process.env.RPC_MODE;
+// Exercise command selection without changing the fixture's native filesystem paths.
+if (process.env.RPC_PLATFORM) Object.defineProperty(process, 'platform', { value: process.env.RPC_PLATFORM });
 
-childProcess.execFileSync = (file, args) => {
+childProcess.execFileSync = (file, args, options) => {
   assert.equal(file, 't3');
+  assert.equal(options.shell, process.platform === 'win32');
   record({ args });
   if (args[0] === 'thread') return '{}';
   assert.deepEqual(args, ['auth', 'session', 'issue', '--scope', 'terminal:operate', '--ttl', '5m', '--token-only']);
