@@ -98,6 +98,12 @@ async function checkPrivate(path: string, directory: boolean) {
 }
 
 function windowsAcl(path: string, script: string) {
+  // Windows PowerShell cannot load PowerShell 7 modules inherited via Node.
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) => key.toLowerCase() !== "psmodulepath",
+    ),
+  );
   execFileSync(
     "powershell.exe",
     [
@@ -111,7 +117,7 @@ function windowsAcl(path: string, script: string) {
   `,
     ],
     {
-      env: { ...process.env, ISSUE_RUNNER_T3_CREDENTIAL_PATH: path },
+      env: { ...env, ISSUE_RUNNER_T3_CREDENTIAL_PATH: path },
       stdio: ["ignore", "ignore", "pipe"],
       encoding: "utf8",
     },

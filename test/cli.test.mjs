@@ -22,6 +22,17 @@ import { after, before, beforeEach, test } from "node:test";
 import { parse, stringify } from "yaml";
 
 let root, home, launch, bin, packageRoot;
+function windowsPowerShellEnv(overrides) {
+  return {
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => key.toLowerCase() !== "psmodulepath",
+      ),
+    ),
+    ...overrides,
+  };
+}
+
 before(async () => {
   root = await mkdtemp(resolve(".test-"));
   // npm 11 exports global allow-scripts settings to lifecycle children, but scoped installs reject that flag.
@@ -1802,11 +1813,10 @@ test("custom-only browser login, status, and init use the Core templates and ret
       `,
         ],
         {
-          env: {
-            ...process.env,
+          env: windowsPowerShellEnv({
             TEST_CREDENTIAL_DIR: store,
             TEST_CREDENTIAL_FILE: join(store, file),
-          },
+          }),
         },
       );
     }
@@ -1974,7 +1984,7 @@ test("status refuses non-private credential directories and files without repair
               `$ErrorActionPreference = 'Stop'; ${script}`,
             ],
             {
-              env: { ...process.env, TEST_CREDENTIAL_PATH: path, ...env },
+              env: windowsPowerShellEnv({ TEST_CREDENTIAL_PATH: path, ...env }),
               encoding: "utf8",
             },
           ).trim();
