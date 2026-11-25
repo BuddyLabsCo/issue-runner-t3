@@ -1,6 +1,6 @@
 # Issue Runner for T3 Code
 
-Deliver GitHub Issues from native T3 Code task threads using [Issue Runner Core](https://github.com/BuddyLabsCo/issue-runner-core).
+Issue Runner runs GitHub Issues in native T3 Code threads using [Issue Runner Core](https://github.com/BuddyLabsCo/issue-runner-core).
 
 ## Prerequisites
 
