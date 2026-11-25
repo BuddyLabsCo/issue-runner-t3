@@ -35,6 +35,8 @@ For a nondefault endpoint, append its URL to both commands and reuse it when ini
 
 ## Setup and launch
 
+Open the terminal drawer to inspect Runner output.
+
 Check the host before initializing a Project.
 
 Review the Project configuration and User Prompts before launching Runner.
