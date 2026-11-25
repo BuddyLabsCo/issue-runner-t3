@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { posixTest } from "./support/release-fixture.ts";
+import { posixTest, releasePullRequest } from "./support/release-fixture.ts";
 import {
   createPublishFixture,
   mergedRelease,
@@ -70,7 +70,9 @@ await posixTest(
     fixture.git("merge", "--ff-only", "auto-release");
     fixture.git("push", "origin", "main");
     fixture.configureGitHub({
-      pullRequest: { number: "18", body: "T3 release" },
+      pullRequests: [
+        releasePullRequest(18, { state: "closed", body: "T3 release" }),
+      ],
     });
     const merge = fixture.head();
     const tarball = fixture.pack(fixture.artifacts);
@@ -84,11 +86,41 @@ await posixTest(
 );
 
 await posixTest(
-  "a GitHub Release with another identity is rejected before publishing",
+  "an unrelated GitHub Release does not block publication",
   (t) => {
     const fixture = createPublishFixture(t);
     const { merge, tarball } = mergedRelease(fixture);
-    fixture.configureGitHub({ release: { tag: "v9.0.0", draft: true } });
+    const unrelated = {
+      tag: "v9.0.0",
+      draft: true,
+      targetCommitish: fixture.git("rev-parse", "HEAD~1"),
+    };
+    fixture.configureGitHub({ releases: { "v9.0.0": unrelated } });
+    const result = fixture.run(
+      "publish-release",
+      publishEnvironment(merge, tarball),
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(fixture.release("v9.0.0"), unrelated);
+    assert.equal(fixture.remoteTag("v0.1.1"), merge);
+    assert.deepEqual(fixture.release("v0.1.1"), {
+      tag: "v0.1.1",
+      draft: false,
+    });
+  },
+);
+
+await posixTest(
+  "a same-tag draft without a tag targeting another commit is rejected before publishing",
+  (t) => {
+    const fixture = createPublishFixture(t);
+    const { merge, tarball } = mergedRelease(fixture);
+    const draft = {
+      tag: "v0.1.1",
+      draft: true,
+      targetCommitish: fixture.git("rev-parse", "HEAD~1"),
+    };
+    fixture.configureGitHub({ releases: { "v0.1.1": draft } });
     const result = fixture.runExpectingFailure(
       "publish-release",
       publishEnvironment(merge, tarball),
@@ -102,6 +134,7 @@ await posixTest(
       false,
     );
     assert.equal(fixture.remoteTag("v0.1.1"), "");
+    assert.deepEqual(fixture.release("v0.1.1"), draft);
   },
 );
 
@@ -157,5 +190,60 @@ await posixTest(
     assert.match(result.stderr, /Check out the merged release commit/);
     assert.deepEqual(fixture.calls("npm"), []);
     assert.equal(fixture.remoteTag("v0.1.1"), "");
+  },
+);
+
+await posixTest(
+  "a same-tag draft targeting a branch that has advanced is rejected without a tag",
+  (t) => {
+    const fixture = createPublishFixture(t);
+    const { merge, tarball } = mergedRelease(fixture);
+    fixture.commit("README.md", "# Main advanced\n", "docs: update main");
+    fixture.git("push", "origin", "main");
+    fixture.git("checkout", merge);
+    const draft = { tag: "v0.1.1", draft: true, targetCommitish: "main" };
+    fixture.configureGitHub({ releases: { "v0.1.1": draft } });
+    const failed = fixture.runExpectingFailure(
+      "publish-release",
+      publishEnvironment(merge, tarball),
+    );
+    assert.match(
+      failed.stderr,
+      /GitHub Release identity does not match v0.1.1/,
+    );
+    assert.equal(
+      fixture.calls("npm").some(({ args }) => args[0] === "publish"),
+      false,
+    );
+    assert.equal(fixture.remoteTag("v0.1.1"), "");
+    assert.deepEqual(fixture.release("v0.1.1"), draft);
+
+    // A matching existing remote tag determines identity, regardless of the
+    // draft's targetCommitish (which GitHub ignores once the tag exists).
+    fixture.tag("v0.1.1");
+    const recovered = fixture.run(
+      "publish-release",
+      publishEnvironment(merge, tarball),
+    );
+    assert.equal(recovered.status, 0, recovered.stderr);
+    assert.deepEqual(fixture.release("v0.1.1"), { ...draft, draft: false });
+    assert.equal(fixture.remoteTag("v0.1.1"), merge);
+  },
+);
+
+await posixTest(
+  "an existing draft with no tag can recover when its branch resolves to the release commit",
+  (t) => {
+    const fixture = createPublishFixture(t);
+    const { merge, tarball } = mergedRelease(fixture);
+    const draft = { tag: "v0.1.1", draft: true, targetCommitish: "main" };
+    fixture.configureGitHub({ releases: { "v0.1.1": draft } });
+    const result = fixture.run(
+      "publish-release",
+      publishEnvironment(merge, tarball),
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fixture.remoteTag("v0.1.1"), merge);
+    assert.deepEqual(fixture.release("v0.1.1"), { ...draft, draft: false });
   },
 );

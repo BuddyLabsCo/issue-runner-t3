@@ -131,30 +131,36 @@ export interface LockfileVersions {
   top: string | null;
 }
 
+function lockfileRoot(
+  lockfile: Record<string, unknown>,
+): Record<string, unknown> | null {
+  const packages = lockfile.packages;
+  if (
+    typeof packages !== "object" ||
+    packages === null ||
+    Array.isArray(packages)
+  )
+    return null;
+  const root = (packages as Record<string, unknown>)[""];
+  return typeof root === "object" && root !== null && !Array.isArray(root)
+    ? (root as Record<string, unknown>)
+    : null;
+}
+
 // `npm install` mirrors the root package version into both lockfile locations,
 // so a release must agree with both of them.
 export function lockfileVersions(
   lockfile: Record<string, unknown>,
   label: string,
 ): LockfileVersions {
-  let rootVersion: string | null = null;
-  const packages = lockfile.packages;
-  if (
-    typeof packages === "object" &&
-    packages !== null &&
-    !Array.isArray(packages)
-  ) {
-    const root = (packages as Record<string, unknown>)[""];
-    if (typeof root === "object" && root !== null && !Array.isArray(root)) {
-      const candidate = root as Record<string, unknown>;
-      if ("version" in candidate) {
-        rootVersion = requireVersion(
-          candidate.version,
+  const root = lockfileRoot(lockfile);
+  const rootVersion =
+    root !== null && "version" in root
+      ? requireVersion(
+          root.version,
           `${label} ${LOCKFILE_FILE} packages version`,
-        );
-      }
-    }
-  }
+        )
+      : null;
   const topVersion =
     "version" in lockfile
       ? requireVersion(lockfile.version, `${label} ${LOCKFILE_FILE} version`)
@@ -174,17 +180,8 @@ export function writeLockfileVersion(version: string): void {
     LOCKFILE_FILE,
   );
   lockfile.version = version;
-  const packages = lockfile.packages;
-  if (
-    typeof packages === "object" &&
-    packages !== null &&
-    !Array.isArray(packages)
-  ) {
-    const root = (packages as Record<string, unknown>)[""];
-    if (typeof root === "object" && root !== null && !Array.isArray(root)) {
-      (root as Record<string, unknown>).version = version;
-    }
-  }
+  const root = lockfileRoot(lockfile);
+  if (root !== null) root.version = version;
   writeFileSync(LOCKFILE_FILE, `${JSON.stringify(lockfile, null, 2)}\n`);
 }
 

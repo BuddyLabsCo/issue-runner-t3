@@ -29,7 +29,10 @@ await posixTest(
 
     assert.equal(result.status, 0, result.stderr);
     assert.equal(fixture.remoteTag("v0.1.1"), merge);
-    assert.deepEqual(fixture.state().release, { tag: "v0.1.1", draft: false });
+    assert.deepEqual(fixture.release("v0.1.1"), {
+      tag: "v0.1.1",
+      draft: false,
+    });
   },
 );
 
@@ -69,7 +72,7 @@ await posixTest(
     assert.match(failed.stderr, /simulated gh release create failure/);
     assert.match(failed.stderr, /Completed stages: npm, tag\./);
     assert.equal(fixture.remoteTag("v0.1.1"), merge);
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
 
     fixture.configureGitHub({ fail: "" });
     const retry = fixture.run(
@@ -82,7 +85,10 @@ await posixTest(
       fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
       1,
     );
-    assert.equal((fixture.state().release as { draft: boolean }).draft, false);
+    assert.equal(
+      (fixture.release("v0.1.1") as { draft: boolean }).draft,
+      false,
+    );
   },
 );
 
@@ -141,7 +147,10 @@ await posixTest(
       0,
     );
     assert.equal(fixture.remoteTag("v0.1.1"), merge);
-    assert.deepEqual(fixture.state().release, { tag: "v0.1.1", draft: false });
+    assert.deepEqual(fixture.release("v0.1.1"), {
+      tag: "v0.1.1",
+      draft: false,
+    });
   },
 );
 
@@ -164,7 +173,7 @@ await posixTest(
 
     assert.match(result.stderr, /already published with different contents/);
     assert.equal(fixture.remoteTag("v0.1.1"), "");
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
     assert.equal(
       fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
       0,
@@ -199,7 +208,7 @@ for (const code of ["E401", "E403", "E404"]) {
       assert.match(result.stderr, /No npm token fallback/);
       assert.match(result.stderr, /No publication stages completed\./);
       assert.equal(fixture.remoteTag("v0.1.1"), "");
-      assert.equal(fixture.state().release, null);
+      assert.equal(fixture.release("v0.1.1"), null);
       assert.equal(fixture.npmState().latest, "");
       assert.equal(
         fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
@@ -229,7 +238,7 @@ for (const prefix of ["npm_config_", "NPM_CONFIG_"]) {
       assert.match(result.stderr, /No publication stages completed/);
       assert.equal(fixture.npmState().latest, "");
       assert.equal(fixture.remoteTag("v0.1.1"), "");
-      assert.equal(fixture.state().release, null);
+      assert.equal(fixture.release("v0.1.1"), null);
       const publish = fixture
         .calls("npm")
         .filter(({ args }) => args[0] === "publish");
@@ -264,7 +273,7 @@ await posixTest(
     assert.match(result.stderr, /registry rejected the upload/);
     assert.match(result.stderr, /No publication stages completed\./);
     assert.equal(fixture.remoteTag("v0.1.1"), "");
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
   },
 );
 
@@ -292,7 +301,7 @@ await posixTest(
       0,
     );
     assert.equal(fixture.remoteTag("v0.1.1"), "");
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
   },
 );
 
@@ -301,7 +310,11 @@ await posixTest(
 await posixTest("a draft Release is published instead of recreated", (t) => {
   const fixture = createPublishFixture(t);
   const { merge, tarball } = mergedRelease(fixture);
-  fixture.configureGitHub({ release: { tag: "v0.1.1", draft: true } });
+  fixture.configureGitHub({
+    releases: {
+      "v0.1.1": { tag: "v0.1.1", draft: true, targetCommitish: merge },
+    },
+  });
 
   const result = fixture.run(
     "publish-release",
@@ -321,7 +334,11 @@ await posixTest("a draft Release is published instead of recreated", (t) => {
       .length,
     0,
   );
-  assert.deepEqual(fixture.state().release, { tag: "v0.1.1", draft: false });
+  assert.deepEqual(fixture.release("v0.1.1"), {
+    tag: "v0.1.1",
+    draft: false,
+    targetCommitish: merge,
+  });
 });
 
 await posixTest(
@@ -339,7 +356,7 @@ await posixTest(
     );
     assert.match(result.stderr, /npm latest points at 0.2.0/);
     assert.equal(fixture.remoteTag("v0.1.1"), "");
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
     assert.equal(
       fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
       0,

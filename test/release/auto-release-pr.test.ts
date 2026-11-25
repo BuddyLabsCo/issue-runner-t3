@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import {
   createReleaseFixture,
+  releasePullRequest,
   posixTest,
   type ReleaseFixture,
 } from "./support/release-fixture.ts";
@@ -80,7 +81,7 @@ await posixTest(
     assert.match(changelog, /## 0\.1\.0/);
     assert.match(changelog, /- feat: \[issue-1\] add shipped behavior/);
     assert.match(
-      String((fixture.state().pullRequest as { body: string }).body),
+      String((fixture.state().pullRequests as { body: string }[])[0]?.body),
       /Proposed release 0\.1\.0/,
     );
   },
@@ -149,7 +150,7 @@ await posixTest(
     assert.match(changelog, /## 0\.1\.1/);
     assert.ok(!changelog.includes("Initial implementation"));
     assert.match(
-      String((fixture.state().pullRequest as { body: string }).body),
+      String((fixture.state().pullRequests as { body: string }[])[0]?.body),
       /v0\.1\.0/,
     );
   },
@@ -207,9 +208,13 @@ await posixTest(
     assert.equal(skipped.status, 0, skipped.stderr);
     assert.equal(fixture.remoteHeads("auto-release"), "");
     assert.equal(
-      fixture.calls("gh").length,
-      1,
-      "Only the open pull request lookup may run",
+      fixture
+        .calls("gh")
+        .filter(
+          ({ args }) =>
+            args[0] === "pr" && ["create", "edit"].includes(args[1] ?? ""),
+        ).length,
+      0,
     );
 
     const prompt = fixture.commit(
@@ -252,6 +257,15 @@ await posixTest("a release-only merge proposes nothing", (t) => {
   fixture.git("add", ".");
   fixture.git("commit", "-m", "chore: propose release v0.1.1");
 
+  fixture.configureGitHub({
+    pullRequests: [
+      releasePullRequest(17, {
+        state: "closed",
+        merged_at: "2026-11-25T00:00:00Z",
+        merge_commit_sha: fixture.head(),
+      }),
+    ],
+  });
   const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
 
   assert.equal(result.status, 0, result.stderr);
@@ -281,6 +295,15 @@ await posixTest("merging a seeded first proposal proposes nothing", (t) => {
   fixture.git("add", ".");
   fixture.git("commit", "-m", "chore: propose release v0.1.0");
 
+  fixture.configureGitHub({
+    pullRequests: [
+      releasePullRequest(17, {
+        state: "closed",
+        merged_at: "2026-11-25T00:00:00Z",
+        merge_commit_sha: fixture.head(),
+      }),
+    ],
+  });
   const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
 
   assert.equal(result.status, 0, result.stderr);
@@ -306,10 +329,13 @@ await posixTest(
     });
     const before = commitReleaseFiles(fixture, "0.1.0", "chore: release 0.1.0");
     fixture.configureGitHub({
-      mergedPullRequest: {
-        number: "17",
-        mergeCommit: { oid: fixture.head() },
-      },
+      pullRequests: [
+        releasePullRequest(17, {
+          state: "closed",
+          merged_at: "2026-11-25T00:00:00Z",
+          merge_commit_sha: fixture.head(),
+        }),
+      ],
     });
 
     const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
@@ -348,10 +374,13 @@ await posixTest(
     fixture.git("add", ".");
     fixture.git("commit", "-m", "chore: maintain the major version");
     fixture.configureGitHub({
-      mergedPullRequest: {
-        number: "17",
-        mergeCommit: { oid: fixture.head() },
-      },
+      pullRequests: [
+        releasePullRequest(17, {
+          state: "closed",
+          merged_at: "2026-11-25T00:00:00Z",
+          merge_commit_sha: fixture.head(),
+        }),
+      ],
     });
 
     const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
@@ -388,10 +417,14 @@ await posixTest(
     fixture.git("add", ".");
     fixture.git("commit", "-m", "chore: bump yaml");
     fixture.configureGitHub({
-      mergedPullRequest: {
-        number: "17",
-        mergeCommit: { oid: released },
-      },
+      pullRequests: [
+        releasePullRequest(17, {
+          state: "closed",
+          merged_at: "2026-11-25T00:00:00Z",
+          merge_commit_sha: released,
+          associatedCommits: [fixture.head()],
+        }),
+      ],
     });
 
     const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
@@ -489,7 +522,9 @@ await posixTest(
     fixture.git("push", "origin", "auto-release");
     fixture.git("checkout", "main");
     fixture.configureGitHub({
-      pullRequest: { number: "17", title: "proposal", body: "old body" },
+      pullRequests: [
+        releasePullRequest(17, { title: "proposal", body: "old body" }),
+      ],
     });
 
     const before = fixture.commit(
@@ -619,3 +654,137 @@ await posixTest("refresh preserves a higher version selected on main", (t) => {
     "1.0.0",
   );
 });
+
+await posixTest(
+  "a same-repository release merge with documentation changes does not propose again",
+  (t) => {
+    const fixture = createReleaseFixture(t, {
+      manifest: { name: "issue-runner-t3", version: "0.1.0", type: "module" },
+    });
+    fixture.propose("0.1.1");
+    fixture.git("checkout", "auto-release");
+    fixture.commit(
+      "README.md",
+      "# Updated release docs\n",
+      "docs: adjust release notes",
+    );
+    fixture.git("checkout", "main");
+    const before = fixture.head();
+    const merge = fixture.squashMerge("chore: merged release and docs");
+    fixture.git("push", "origin", "--delete", "auto-release");
+    fixture.configureGitHub({
+      pullRequests: [
+        releasePullRequest(16, {
+          state: "closed",
+          merged_at: "2026-11-25T00:00:00Z",
+          merge_commit_sha: merge,
+          head: {
+            ref: "auto-release",
+            repo: { full_name: "BuddyLabsCo/fork" },
+          },
+        }),
+        releasePullRequest(17, {
+          state: "closed",
+          merged_at: "2026-11-25T00:00:00Z",
+          merge_commit_sha: merge,
+        }),
+      ],
+    });
+    const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fixture.remoteHeads("auto-release"), "");
+    assert.equal(
+      fixture
+        .calls("gh")
+        .filter(({ args }) => args[0] === "pr" && args[1] === "create").length,
+      0,
+    );
+  },
+);
+
+await posixTest(
+  "a fork's open auto-release PR does not block a new owned proposal",
+  (t) => {
+    const fixture = createReleaseFixture(t);
+    const fork = releasePullRequest(29, {
+      head: { ref: "auto-release", repo: { full_name: "BuddyLabsCo/fork" } },
+    });
+    fixture.configureGitHub({ pullRequests: [fork] });
+    const before = fixture.commit(
+      "README.md",
+      "# New docs\n",
+      "docs: update T3",
+    );
+    const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
+    assert.equal(result.status, 0, result.stderr);
+    assert.notEqual(fixture.remoteHeads("auto-release"), "");
+    assert.deepEqual((fixture.state().pullRequests as unknown[])[0], fork);
+    assert.equal(
+      fixture
+        .calls("gh")
+        .filter(({ args }) => args[0] === "pr" && args[1] === "create").length,
+      1,
+    );
+  },
+);
+
+await posixTest(
+  "refresh selects the owned PR even when a fork appears on an earlier page",
+  (t) => {
+    const fixture = createReleaseFixture(t, {
+      manifest: { name: "issue-runner-t3", version: "0.1.0", type: "module" },
+    });
+    fixture.propose("1.0.0");
+    const fork = releasePullRequest(29, {
+      head: { ref: "auto-release", repo: { full_name: "BuddyLabsCo/fork" } },
+    });
+    fixture.configureGitHub({ pullRequests: [fork, releasePullRequest(30)] });
+    const before = fixture.commit(
+      "README.md",
+      "# New docs\n",
+      "docs: update T3",
+    );
+    const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual((fixture.state().pullRequests as unknown[])[0], fork);
+    const edits = fixture
+      .calls("gh")
+      .filter(({ args }) => args[0] === "pr" && args[1] === "edit");
+    assert.equal(edits.length, 1);
+    assert.equal(edits[0]?.args[2], "30");
+  },
+);
+
+await posixTest(
+  "a fork's merged auto-release PR cannot suppress an eligible push",
+  (t) => {
+    const fixture = createReleaseFixture(t);
+    const before = commitReleaseFiles(
+      fixture,
+      "0.1.0",
+      "chore: propose release v0.1.0",
+    );
+    fixture.configureGitHub({
+      pullRequests: [
+        releasePullRequest(12, {
+          state: "closed",
+          merged_at: "2026-11-25T00:00:00Z",
+          merge_commit_sha: fixture.head(),
+          head: {
+            ref: "auto-release",
+            repo: { full_name: "BuddyLabsCo/fork" },
+          },
+        }),
+      ],
+    });
+    const result = fixture.run("auto-release-pr", { PUSH_BEFORE: before });
+    assert.equal(result.status, 0, result.stderr);
+    assert.notEqual(fixture.remoteHeads("auto-release"), "");
+    assert.equal(
+      fixture
+        .calls("gh")
+        .filter(({ args }) => args[0] === "pr" && args[1] === "create").length,
+      1,
+    );
+  },
+);

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { posixTest } from "./support/release-fixture.ts";
+import { posixTest, releasePullRequest } from "./support/release-fixture.ts";
 import {
   createPublishFixture,
   publishEnvironment,
@@ -16,7 +16,12 @@ await posixTest(
     const merge = fixture.squashMerge();
     const tarball = fixture.pack(fixture.artifacts);
     fixture.configureGitHub({
-      pullRequest: { number: "18", body: "First stable T3 release" },
+      pullRequests: [
+        releasePullRequest(18, {
+          state: "closed",
+          body: "First stable T3 release",
+        }),
+      ],
     });
     fixture.configureNpm({ missingPackage: true });
     const result = fixture.runExpectingFailure(
@@ -62,7 +67,7 @@ await posixTest(
       false,
     );
     assert.equal(fixture.remoteTag("v0.1.0"), "");
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.0"), null);
     // Simulate the maintainer publishing the retained bytes, then rerun without OIDC.
     fixture.configureNpm({
       missingPackage: false,
@@ -80,7 +85,10 @@ await posixTest(
     );
     assert.equal(retry.status, 0, retry.stderr);
     assert.equal(fixture.remoteTag("v0.1.0"), merge);
-    assert.deepEqual(fixture.state().release, { tag: "v0.1.0", draft: false });
+    assert.deepEqual(fixture.release("v0.1.0"), {
+      tag: "v0.1.0",
+      draft: false,
+    });
     assert.equal(
       fixture.calls("npm").some(({ args }) => args[0] === "publish"),
       false,

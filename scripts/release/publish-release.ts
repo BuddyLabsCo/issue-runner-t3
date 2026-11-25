@@ -288,10 +288,10 @@ function remoteTagCommit(tag: string): string | null {
 
 function releaseState(
   tag: string,
-): { tagName: string; isDraft: boolean } | null {
+): { tagName: string; isDraft: boolean; targetCommitish: string } | null {
   const result = execute(
     "gh",
-    ["release", "view", tag, "--json", "tagName,isDraft"],
+    ["release", "view", tag, "--json", "tagName,isDraft,targetCommitish"],
     {
       env: withoutNpmToken(),
     },
@@ -301,7 +301,11 @@ function releaseState(
       return null;
     throw new Error(`gh release view ${tag} failed: ${result.stderr.trim()}`);
   }
-  return JSON.parse(result.stdout) as { tagName: string; isDraft: boolean };
+  return JSON.parse(result.stdout) as {
+    tagName: string;
+    isDraft: boolean;
+    targetCommitish: string;
+  };
 }
 
 function publishToRegistry(tarball: string, version: string): void {
@@ -370,7 +374,7 @@ function localTagCommit(tag: string): string | null {
 
 // Tags are immutable. Both the remote tag and a local tag left by an earlier
 // failed push must identify this release before anything is published.
-function validateTag(tag: string, merge: string): void {
+function validateReleaseIdentity(tag: string, merge: string): void {
   const remote = remoteTagCommit(tag);
   if (remote !== null && remote !== merge) {
     throw new Error(`Tag ${tag} already points at ${remote}, not ${merge}`);
@@ -378,6 +382,21 @@ function validateTag(tag: string, merge: string): void {
   const local = localTagCommit(tag);
   if (local !== null && local !== merge) {
     throw new Error(`Local tag ${tag} points at ${local}, not ${merge}`);
+  }
+  const state = releaseState(tag);
+  if (state === null) return;
+  if (state.tagName !== tag) {
+    throw new Error(`GitHub Release identity does not match ${tag}`);
+  }
+  // The remote tag is authoritative. Without it, resolve the Release target.
+  if (remote === null && state.targetCommitish !== merge) {
+    const ref = `refs/heads/${state.targetCommitish}`;
+    const target = git("ls-remote", "--heads", "origin", ref);
+    if (!target.split("\n").includes(`${merge}\t${ref}`)) {
+      throw new Error(
+        `GitHub Release identity does not match ${tag}: target ${state.targetCommitish} is not ${merge}`,
+      );
+    }
   }
 }
 
@@ -461,10 +480,7 @@ function main(): void {
     );
   }
 
-  validateTag(release.tag, merge);
-  const state = releaseState(release.tag);
-  if (state !== null && state.tagName !== release.tag)
-    throw new Error(`GitHub Release identity does not match ${release.tag}`);
+  validateReleaseIdentity(release.tag, merge);
 
   const handoff = {
     package: PACKAGE_NAME,

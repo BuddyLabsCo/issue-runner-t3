@@ -14,8 +14,10 @@ This map describes where code belongs. The [Core integration contract](https://g
 |   `-- oauth.ts               # Browser sign-in flow
 |-- skills/issue-runner-t3/      # Operator workflows: setup, init and run
 |   `-- scripts/               # Helpers invoked by the Skill
-|-- test/                      # CLI, adapter and Skill helper tests
-|   `-- fixtures/              # Native protocol and external command substitutes
+|-- scripts/release/           # Release proposal, validation and publication
+|-- test/                      # CLI, adapter, Skill and release tests
+|   |-- fixtures/              # Native protocol and external command substitutes
+|   `-- release/               # Release script and workflow tests
 |-- docs/                      # Project documentation
 |   `-- agents/                # Repository instructions for Agents
 `-- dist/                      # Generated JavaScript
@@ -32,7 +34,9 @@ This map describes where code belongs. The [Core integration contract](https://g
 | `src/oauth.ts` | Implement OAuth client registration, PKCE, browser authorization, loopback callback and token exchange. Pass the resulting credential to the credential store. |
 | `skills/issue-runner-t3/` | Guide the operator through prerequisites, Project configuration, prompt review and Run selection. Keep conversational workflows out of the Runner CLI. |
 | `skills/issue-runner-t3/scripts/` | Implement Skill-only automation, including opening the current T3 conversation's terminal and launching Runner. Keep these helpers separate from the task adapter. |
+| `scripts/release/` | Prepare release proposals, validate packed artifacts, publish releases and recover incomplete publication stages. GitHub Actions supplies event identity and credentials. |
 | `test/` | Verify installed CLI behavior, the adapter contract and Skill helpers. Keep simulated external interfaces under `fixtures/`. |
+| `test/release/` | Verify workflow configuration and release-script behavior using disposable Git repositories and GitHub/npm substitutes in `test/fixtures/`. |
 | `docs/` | Explain the architecture and native protocol. Keep Agent instructions under `docs/agents/`. |
 | Core | Own Issue selection and Batches, Worktrees, Assignment dispatch, checkpoints, handoff verification, GitHub operations, integration and recovery. |
 

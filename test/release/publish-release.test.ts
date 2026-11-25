@@ -43,7 +43,10 @@ await posixTest(
     );
     assert.doesNotMatch(String(publish[0]?.authConfig), /_authToken/);
     assert.equal(fixture.remoteTag("v0.1.1"), merge);
-    const release = fixture.state().release as { tag: string; draft: boolean };
+    const release = fixture.release("v0.1.1") as {
+      tag: string;
+      draft: boolean;
+    };
     assert.deepEqual(release, { tag: "v0.1.1", draft: false });
     const create = fixture
       .calls("gh")
@@ -84,7 +87,10 @@ await posixTest(
       "publication must not wait on the registry to report the new latest",
     );
     assert.equal(fixture.remoteTag("v0.1.1"), merge);
-    assert.deepEqual(fixture.state().release, { tag: "v0.1.1", draft: false });
+    assert.deepEqual(fixture.release("v0.1.1"), {
+      tag: "v0.1.1",
+      draft: false,
+    });
   },
 );
 
@@ -268,7 +274,7 @@ await posixTest(
       0,
     );
     assert.equal(fixture.remoteTag("v0.1.1"), "");
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
   },
 );
 
@@ -362,7 +368,7 @@ await posixTest(
       fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
       0,
     );
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
   },
 );
 
@@ -424,7 +430,7 @@ await posixTest(
       false,
     );
     assert.equal(fixture.remoteTag("v0.1.1"), "");
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
   },
 );
 
@@ -450,6 +456,6 @@ for (const missing of [
     );
     assert.deepEqual(fixture.calls("npm"), []);
     assert.equal(fixture.remoteTag("v0.1.1"), "");
-    assert.equal(fixture.state().release, null);
+    assert.equal(fixture.release("v0.1.1"), null);
   });
 }

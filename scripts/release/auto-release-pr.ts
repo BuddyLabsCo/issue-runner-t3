@@ -38,13 +38,6 @@ import {
   writeManifestVersion,
 } from "./release-lib.ts";
 
-const releasePaths = new Set([MANIFEST_FILE, LOCKFILE_FILE, CHANGELOG_FILE]);
-
-// The proposal's own commit subject. A squash merge keeps the pull request
-// title and a rebase keeps the commit message, so the release merge can be
-// recognized even when the first proposal does not change the seeded version.
-const releaseSubject = /^chore: propose release v\d+\.\d+\.\d+(?: \(#\d+\))?$/;
-
 // Release commits are authored by the automation identity, not by whatever the
 // runner happens to have configured.
 const botIdentity = {
@@ -59,40 +52,42 @@ function changedPaths(before: string): string[] {
   return output.split("\0").filter(Boolean);
 }
 
-// The merged release pull request identifies the release merge even when a
-// human edited the squash title or a rebase left a later maintainer commit at
-// the tip of the branch.
-function mergedReleaseCommit(): string | null {
-  const commit = gh(
-    "pr",
-    "list",
-    "--base",
-    TARGET_BRANCH,
-    "--head",
-    RELEASE_BRANCH,
-    "--state",
-    "merged",
-    "--limit",
-    "1",
-    "--json",
-    "mergeCommit",
-    "--jq",
-    ".[0].mergeCommit.oid // empty",
-  );
-  return commit.length > 0 ? commit : null;
+interface PullRequest {
+  number: number;
+  state: string;
+  merged_at: string | null;
+  merge_commit_sha: string | null;
+  base: { ref: string; repo: { full_name: string } | null };
+  head: { ref: string; repo: { full_name: string } | null };
 }
 
-// A push that only lands a release proposal is the release merge itself and
-// must not propose the next version. Ordinary dependency-only changes to the
-// manifest and lockfile stay release content.
-function isReleaseEligible(
-  paths: string[],
-  head: string,
-  headSubject: string,
-): boolean {
-  if (!paths.some((path) => !path.startsWith(".github/"))) return false;
-  if (!paths.every((path) => releasePaths.has(path))) return true;
-  return head !== mergedReleaseCommit() && !releaseSubject.test(headSubject);
+// Branch names alone are not unique across repositories. Filter every page
+// before selecting the owned release PR.
+function releasePullRequests(endpoint: string): PullRequest[] {
+  const pages = JSON.parse(
+    gh("api", `repos/${REPOSITORY}/${endpoint}`, "--paginate", "--slurp"),
+  ) as PullRequest[][];
+  return pages
+    .flat()
+    .filter(
+      (pr) =>
+        pr.base.ref === TARGET_BRANCH &&
+        pr.base.repo?.full_name === REPOSITORY &&
+        pr.head.ref === RELEASE_BRANCH &&
+        pr.head.repo?.full_name === REPOSITORY,
+    );
+}
+
+function isReleaseMerge(head: string): boolean {
+  return releasePullRequests(`commits/${head}/pulls?per_page=100`).some(
+    (pr) => Boolean(pr.merged_at) && pr.merge_commit_sha === head,
+  );
+}
+
+function openReleasePullRequest(): number | undefined {
+  return releasePullRequests(
+    `pulls?state=open&base=${TARGET_BRANCH}&head=${REPOSITORY.split("/")[0]}:${RELEASE_BRANCH}&per_page=100`,
+  ).find((pr) => pr.state === "open")?.number;
 }
 
 function nextVersion(latest: string | null, current: string | null): string {
@@ -125,6 +120,15 @@ function proposedVersion(): string {
     "proposed",
   );
   return requireVersion(manifest.version, `proposed ${MANIFEST_FILE} version`);
+}
+
+function chooseVersion(
+  latest: string | null,
+  openPullRequest: number | undefined,
+): string {
+  const next = nextVersion(latest, currentVersion());
+  const proposed = openPullRequest !== undefined ? proposedVersion() : next;
+  return compareVersions(proposed, next) > 0 ? proposed : next;
 }
 
 function releaseBody(
@@ -168,39 +172,24 @@ function main(): void {
     );
   }
 
-  const paths = changedPaths(before);
-  const current = currentVersion();
-  const head = git("rev-parse", "HEAD");
-  const eligible = isReleaseEligible(
-    paths,
-    head,
-    git("log", "-1", "--pretty=%s", "HEAD"),
+  if (isReleaseMerge(git("rev-parse", "HEAD"))) {
+    console.log("Release merge; skipping release preparation.");
+    return;
+  }
+
+  const eligible = changedPaths(before).some(
+    (path) => !path.startsWith(".github/"),
   );
-  const openPullRequest = gh(
-    "pr",
-    "list",
-    "--base",
-    TARGET_BRANCH,
-    "--head",
-    RELEASE_BRANCH,
-    "--state",
-    "open",
-    "--json",
-    "number",
-    "--jq",
-    ".[0].number // empty",
-  );
+  const openPullRequest = openReleasePullRequest();
 
   // Ignored paths prevent a new proposal; they never stop refreshing an open one.
-  if (!eligible && openPullRequest.length === 0) {
+  if (!eligible && openPullRequest === undefined) {
     console.log("No release-eligible changes; skipping release preparation.");
     return;
   }
 
   const latest = latestReleasedVersion();
-  const next = nextVersion(latest, current);
-  const proposed = openPullRequest ? proposedVersion() : next;
-  const version = compareVersions(proposed, next) > 0 ? proposed : next;
+  const version = chooseVersion(latest, openPullRequest);
   const base = latest === null ? null : tagName(latest);
   const entries = git(
     "log",
@@ -238,11 +227,11 @@ function main(): void {
   try {
     const bodyFile = join(temporary, "body.md");
     writeFileSync(bodyFile, body);
-    if (openPullRequest.length > 0) {
+    if (openPullRequest !== undefined) {
       gh(
         "pr",
         "edit",
-        openPullRequest,
+        String(openPullRequest),
         "--title",
         title,
         "--body-file",

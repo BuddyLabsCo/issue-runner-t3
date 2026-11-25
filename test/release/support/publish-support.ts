@@ -1,5 +1,6 @@
 import {
   createReleaseFixture,
+  releasePullRequest,
   type FixtureOptions,
   type ReleaseFixture,
 } from "./release-fixture.ts";
@@ -85,11 +86,15 @@ export function mergedRelease(fixture: ReleaseFixture): {
   fixture.propose("0.1.1");
   const merge = fixture.squashMerge();
   fixture.configureGitHub({
-    pullRequest: {
-      number: "18",
-      title: "chore: propose release v0.1.1",
-      body: releaseBody,
-    },
+    pullRequests: [
+      releasePullRequest(18, {
+        state: "closed",
+        merged_at: "2026-11-25T00:00:00Z",
+        merge_commit_sha: merge,
+        title: "chore: propose release v0.1.1",
+        body: releaseBody,
+      }),
+    ],
   });
   return { merge, tarball: fixture.pack(fixture.artifacts) };
 }

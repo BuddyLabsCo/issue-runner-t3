@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -58,151 +59,32 @@ export interface ReleaseFixture {
   configureGitHub: (patch: Record<string, unknown>) => void;
   configureNpm: (patch: Record<string, unknown>) => void;
   state: () => Record<string, unknown>;
+  release: (tag: string) => unknown;
   npmState: () => Record<string, unknown>;
   pack: (directory: string) => string;
   remoteTag: (tag: string) => string;
   remoteHeads: (branch: string) => string;
 }
 
-const githubCLI = String.raw`#!/usr/bin/env node
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-const statePath = process.env.RELEASE_GH_STATE;
-const logPath = process.env.RELEASE_COMMAND_LOG;
-const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-const flag = (name) => args[args.indexOf(name) + 1];
-const bodyFile = args.includes("--body-file") ? flag("--body-file") : null;
-const body = bodyFile ? fs.readFileSync(bodyFile, "utf8") : null;
-fs.appendFileSync(logPath, JSON.stringify({ command: "gh", args, body,
-  token: Boolean(process.env.GH_TOKEN) }) + "\n");
-if (state.fail === args[0] + " " + args[1]) {
-  console.error("simulated gh " + state.fail + " failure");
-  process.exit(42);
+export function releasePullRequest(
+  number: number,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    number,
+    title: "Release proposal",
+    body: "Release body",
+    state: "open",
+    merged_at: null,
+    merge_commit_sha: null,
+    base: { ref: "main", repo: { full_name: "BuddyLabsCo/issue-runner-t3" } },
+    head: {
+      ref: "auto-release",
+      repo: { full_name: "BuddyLabsCo/issue-runner-t3" },
+    },
+    ...overrides,
+  };
 }
-const save = () => fs.writeFileSync(statePath, JSON.stringify(state));
-if (args[0] === "pr" && args[1] === "list") {
-  if (flag("--base") !== "main" || flag("--head") !== "auto-release") process.exit(91);
-  if (flag("--state") === "merged") {
-    console.log(state.mergedPullRequest
-      ? state.mergedPullRequest.mergeCommit.oid : "");
-  } else if (flag("--state") === "open") {
-    console.log(state.pullRequest ? state.pullRequest.number : "");
-  } else process.exit(91);
-  process.exit(0);
-}
-if (args[0] === "pr" && args[1] === "view") {
-  if (flag("--json") !== "body") process.exit(92);
-  console.log(state.pullRequest.body);
-  process.exit(0);
-}
-if (args[0] === "pr" && (args[1] === "create" || args[1] === "edit")) {
-  if (body === null || !flag("--title")) process.exit(93);
-  if (args[1] === "create") {
-    if (state.pullRequest) process.exit(94);
-    state.pullRequest = { number: "17", title: flag("--title"), body };
-  } else {
-    if (!state.pullRequest || args[2] !== state.pullRequest.number) process.exit(95);
-    state.pullRequest.title = flag("--title");
-    state.pullRequest.body = body;
-  }
-  save();
-  console.log("https://github.com/BuddyLabsCo/issue-runner-t3/pull/" +
-    (args[1] === "create" ? "17" : args[2]));
-  process.exit(0);
-}
-if (args[0] === "release" && args[1] === "view") {
-  if (!state.release) { console.error("release not found"); process.exit(1); }
-  console.log(JSON.stringify({ tagName: state.release.tag, isDraft: state.release.draft }));
-  process.exit(0);
-}
-if (args[0] === "release" && args[1] === "create") {
-  if (state.release || !args.includes("--verify-tag") || !flag("--notes")) process.exit(96);
-  state.release = { tag: args[2], draft: args.includes("--draft") };
-  save();
-  process.exit(0);
-}
-if (args[0] === "release" && args[1] === "edit") {
-  if (!state.release || !args.includes("--draft=false")) process.exit(97);
-  state.release.draft = false;
-  save();
-  process.exit(0);
-}
-process.exit(90);
-`;
-
-const npmCLI = String.raw`#!/usr/bin/env node
-const crypto = require("node:crypto");
-const fs = require("node:fs");
-const args = process.argv.slice(2);
-const statePath = process.env.RELEASE_NPM_STATE;
-const logPath = process.env.RELEASE_COMMAND_LOG;
-const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
-const flag = (name) => args[args.indexOf(name) + 1];
-const userConfig = args.includes("--userconfig") ? flag("--userconfig") : null;
-const authConfig = userConfig && fs.existsSync(userConfig)
-  ? fs.readFileSync(userConfig, "utf8") : null;
-const scopedToken = process.env["npm_config_//registry.npmjs.org/:_authToken"] ||
-  process.env["NPM_CONFIG_//registry.npmjs.org/:_authToken"];
-fs.appendFileSync(logPath, JSON.stringify({ command: "npm", args,
-  body: null, authConfig, token: Boolean(process.env.NODE_AUTH_TOKEN || process.env.NPM_TOKEN || scopedToken) }) + "\n");
-if (state.fail === args[0] + " " + args[1] || state.fail === args[0]) {
-  console.error(state.message || "simulated npm " + state.fail + " failure");
-  process.exit(42);
-}
-const save = () => fs.writeFileSync(statePath, JSON.stringify(state));
-if (args[0] === "view") {
-  const spec = args[1], field = args[2];
-  const separator = spec.lastIndexOf("@");
-  const name = separator > 0 ? spec.slice(0, separator) : spec;
-  const version = separator > 0 ? spec.slice(separator + 1) : null;
-  if (name !== "issue-runner-t3") {
-    console.error("npm error code E404\nnpm error 404 Not Found - GET " +
-      "https://registry.npmjs.org/" + encodeURIComponent(name));
-    process.exit(1);
-  }
-  if (field === "name") {
-    if (state.missingPackage) { console.error("npm error code E404\nnpm error 404 Not Found"); process.exit(1); }
-    console.log(JSON.stringify(name));
-  } else if (field === "dist-tags.latest") {
-    if (!state.latest) {
-      console.error("npm error code E404\nnpm error 404 Not Found");
-      process.exit(1);
-    }
-    console.log(JSON.stringify(state.latest));
-  } else if (field === "version" || field === "dist.integrity") {
-    const published = state.registry[version];
-    if (!published) {
-      console.error("npm error code E404\nnpm error 404 Not Found - GET " +
-        "https://registry.npmjs.org/issue-runner-t3/" + version);
-      process.exit(1);
-    }
-    console.log(JSON.stringify(field === "version" ? version : published));
-  } else process.exit(91);
-  process.exit(0);
-}
-if (args[0] === "publish") {
-  // npm can fall back to existing registry credentials after OIDC fails.
-  if (state.oidcFailure && !scopedToken) {
-    console.error("npm error code ENEEDAUTH\nnpm error OIDC authorization failed");
-    process.exit(1);
-  }
-  if (!args.includes("--tag") || args[args.indexOf("--tag") + 1] !== "latest") process.exit(92);
-  const tarball = args[1], version = tarball.split("-").at(-1).replace(/\.tgz$/, "");
-  if (state.registry[version]) {
-    console.error("npm error code E403\nnpm error 403 You cannot publish over the previously published versions");
-    process.exit(1);
-  }
-  state.registry[version] = "sha512-" +
-    crypto.createHash("sha512").update(fs.readFileSync(tarball)).digest("base64");
-  // A real registry can keep answering with the previous latest tag for a
-  // while after a successful upload; only the exit status is authoritative.
-  if (!state.staleLatest) state.latest = version;
-  save();
-  console.log("+ issue-runner-t3@" + version);
-  process.exit(0);
-}
-process.exit(90);
-`;
 
 export interface FixtureOptions {
   manifest?: Record<string, unknown>;
@@ -257,9 +139,8 @@ export function createReleaseFixture(
   writeFileSync(
     githubState,
     JSON.stringify({
-      pullRequest: null,
-      mergedPullRequest: null,
-      release: null,
+      pullRequests: [],
+      releases: {},
       fail: "",
     }),
   );
@@ -274,10 +155,20 @@ export function createReleaseFixture(
     }),
   );
   writeFileSync(log, "");
-  writeFileSync(path.join(bin, "gh"), githubCLI);
-  chmodSync(path.join(bin, "gh"), 0o755);
-  writeFileSync(path.join(bin, "npm"), npmCLI);
-  chmodSync(path.join(bin, "npm"), 0o755);
+  for (const command of ["gh", "npm"]) {
+    const script = path.join(bin, `release-${command}.mjs`);
+    copyFileSync(
+      new URL(`../../fixtures/release-${command}.mjs`, import.meta.url),
+      script,
+    );
+    // Use an extensionless launcher to keep ESM detection independent of cwd.
+    const executable = path.join(bin, command);
+    writeFileSync(
+      executable,
+      `#!/bin/sh\nexec node "$(dirname "$0")/release-${command}.mjs" "$@"\n`,
+    );
+    chmodSync(executable, 0o755);
+  }
 
   const exec = (command: string, args: string[]) =>
     spawnSync(command, args, { cwd, env, encoding: "utf8", timeout: 30_000 });
@@ -447,6 +338,8 @@ export function createReleaseFixture(
       writeFileSync(npmState, JSON.stringify({ ...current, ...patch }));
     },
     state: () => readState(githubState),
+    release: (tag) =>
+      (readState(githubState).releases as Record<string, unknown>)[tag] ?? null,
     npmState: () => readState(npmState),
     pack,
     remoteTag: (tag) =>
