@@ -80,6 +80,13 @@ test('installed CLI offers help and version without credentials', async () => {
   assert.match(version.output, /issue-runner-t3 .*core 1\.0\.10/);
 });
 
+test('installed Runner includes its discoverable companion skill', async () => {
+  const packageRoot = join(root, 'install', ...(process.platform === 'win32' ? [] : ['lib']), 'node_modules', 'issue-runner-t3');
+  const source = await readFile(join(packageRoot, 'skills', 'issue-runner-t3', 'SKILL.md'), 'utf8');
+  const [, metadata] = source.split('---');
+  assert.equal(parse(metadata).name, 'issue-runner-t3');
+});
+
 test('run refuses missing or blank launcher thread before authorization', async () => {
   for (const id of [undefined, '', '   ']) {
     const result = await cli(['run', '--project', 'demo', '--issue', '42'], { env: { T3CODE_THREAD_ID: id } });
@@ -978,6 +985,41 @@ test('missing credentials prevent Core from creating a Project', async () => {
   assert.match(status.output, /missing/i);
   assert.ok(status.output.includes('http://127.0.0.1:3773/mcp'));
   assert.deepEqual(await readdir(home), []);
+});
+
+test('init refuses existing child directories and preserves partial Project output', async () => {
+  const server = await substitute();
+  try {
+    assert.equal((await cli(['auth', 'login', server.endpoint], { approve })).code, 0);
+    const init = key => cli(['init', '--project', key, '--mcp-url', server.endpoint]);
+    const existing = join(launch, 'existing');
+    await mkdir(existing);
+    await writeFile(join(existing, 'notes.md'), 'Operator work');
+    const refused = await init('existing');
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.output, /destination already exists/);
+    assert.deepEqual(await readdir(existing), ['notes.md']);
+    assert.equal(await readFile(join(existing, 'notes.md'), 'utf8'), 'Operator work');
+
+    const template = join(root, 'install', ...(process.platform === 'win32' ? [] : ['lib']), 'node_modules', 'issue-runner-t3', 'node_modules', 'issue-runner-core', 'templates', 'prompts', 'review.md');
+    await rename(template, `${template}.unavailable`);
+    try {
+      const failed = await init('partial');
+      assert.notEqual(failed.code, 0);
+      assert.match(failed.output, /partial output was retained/);
+    } finally {
+      await rename(`${template}.unavailable`, template);
+    }
+    const partial = join(launch, 'partial');
+    const config = await readFile(join(partial, 'config.yaml'), 'utf8');
+    const prompt = await readFile(join(partial, 'prompts', 'implement.md'), 'utf8');
+    const repeat = await init('partial');
+    assert.notEqual(repeat.code, 0);
+    assert.match(repeat.output, /destination already exists/);
+    assert.equal(await readFile(join(partial, 'config.yaml'), 'utf8'), config);
+    assert.equal(await readFile(join(partial, 'prompts', 'implement.md'), 'utf8'), prompt);
+    assert.deepEqual(await readdir(join(partial, 'prompts')), ['implement.md']);
+  } finally { await server.close(); }
 });
 
 test('normalized endpoints share credentials and distinct endpoints are isolated', async () => {
