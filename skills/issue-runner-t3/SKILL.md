@@ -1,11 +1,11 @@
 ---
 name: issue-runner-t3
-description: Prepare and launch Issue Runner for the current T3 Code conversation. Use for $issue-runner-t3 setup (host checks and authorization), init (Project configuration and prompts), or run (Issue selection and terminal launch).
+description: Manage Issue Runner for the current T3 Code conversation. Use for $issue-runner-t3 setup (host checks and authorization), init (Project configuration and prompts), run (Issue selection and terminal launch), or cleanup (remove Project files except configuration and prompts).
 ---
 
 # Issue Runner for T3 Code
 
-Prepare the Runner host, initialize a Project, and launch Runner from the current T3 conversation.
+Prepare the Runner host, initialize a Project, launch Runner, and clean up Project files from the current T3 conversation.
 
 ## Prepare project parameters
 
@@ -13,11 +13,11 @@ Prepare the Runner host, initialize a Project, and launch Runner from the curren
 - `repository`: GitHub `owner/repo` from `git remote get-url origin` in `checkout`; strip `.git` and redact credentials.
 - `projectKey`: repository name, e.g. `widget-api` for `acme/widget-api`.
 - `threadId` (`run` only): `parentThreadId` from `orchestrator_capabilities`.
-- `launchDirectory` (`init` and `run` only): absolute path to `~/.issue-runner-t3/runner`. Create it if missing.
+- `launchDirectory` (`init`, `run`, and `cleanup` only): absolute path to `~/.issue-runner-t3/runner`. Create it if missing for `init` or `run` only.
 - `mcpUrl` (`setup` and `init` only): the current T3 Server's [MCP URL](https://github.com/BuddyLabsCo/issue-runner-t3/blob/main/README.md#mcp-url). Ask the operator if it cannot be determined.
 - `agentStart` (`init` only): `t3 start --provider <instance-id> --model <model> [--option <id>=<value>]` from `orchestrator_capabilities` (`inheritedProviderInstanceId`, `inheritedModel`, `inheritedOptions`). Require `canRunChildTask: true` and advertised values. Omit `--option` if no reasoning option is selected; resolve ambiguous or invalid selections with the operator.
 
-If a required parameter is missing, ambiguous, or invalid, resolve it before `init` or `run`. For `setup`, report gaps and continue independent checks.
+If a required parameter is missing, ambiguous, or invalid, resolve it before `init`, `run`, or `cleanup`. For `setup`, report gaps and continue independent checks.
 
 ## `$issue-runner-t3 setup`
 
@@ -27,13 +27,15 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 
 ## `$issue-runner-t3 init`
 
-1. If `<launchDirectory>/<projectKey>/config.yaml` exists, provide a clickable absolute file link in the chat, report any missing User Prompts, and stop without modifying existing files.
+1. If `<launchDirectory>/<projectKey>/config.yaml` exists, provide clickable absolute file links in the chat for `config.yaml` and each existing User Prompt (`prompts/implement.md`, `prompts/review.md`, `prompts/documentation.md`). Report any missing User Prompts and stop without modifying existing files.
 2. Run `issue-runner-t3 init --project <projectKey>` from `launchDirectory`, passing `--mcp-url <mcpUrl>` for a nondefault endpoint. If initialization fails, report the error and stop. Leave all files as they are.
 3. Fill in `config.yaml` using the prepared parameters. Leave all other defaults and comments unchanged.
    ```yaml
    repository: <repository>
    checkout: <checkout>
    issueLabel: ""
+   tracker:
+     reservationLabel: t3:reserved
    ```
    Apply the following to all five profiles under `agents` (`implement`, `review`, `ciRepair`, `conflictRepair`, `documentation`):
    ```yaml
@@ -72,4 +74,8 @@ Show the Runner command (`issue-runner-t3 run --project=<projectKey> <selector> 
 node <skill-directory>/scripts/launch-terminal.mjs <threadId> <launchDirectory> <projectKey> <selector> [--no-auto-merge]
 ```
 
-The launcher opens a new terminal in the current thread at `launchDirectory` and starts Runner. End the turn after the launcher returns.
+The launcher opens a new terminal in the current thread at `launchDirectory` and submits the Runner command. If the launcher exits with code 0, ask the operator to open the terminal drawer to view Runner output. Otherwise, report the error. End the turn after the launcher returns.
+
+## `$issue-runner-t3 cleanup`
+
+Verify the Project directory `<launchDirectory>/<projectKey>` matches the current repository and checkout. Show the deletion list and ask the operator to confirm Runner is stopped and approve cleanup. Recursively delete all entries, including hidden files, except `config.yaml` and `prompts/`, without following symbolic links. Verify and report the result.
