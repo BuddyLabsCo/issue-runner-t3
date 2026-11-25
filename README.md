@@ -1,6 +1,6 @@
 # Issue Runner for T3 Code
 
-Deliver GitHub Issues from native T3 Code task threads using [Issue Runner Core](https://github.com/BuddyLabsCo/issue-runner-core).
+Issue Runner runs GitHub Issues in native T3 Code task threads using [Issue Runner Core](https://github.com/BuddyLabsCo/issue-runner-core).
 
 ## Prerequisites
 
@@ -36,6 +36,8 @@ For a nondefault endpoint, append its URL to both commands and reuse it when ini
 ## Setup and launch
 
 Check the host before initializing a Project.
+
+Review the Project configuration and User Prompts before launching Runner.
 
 In the conversation for the repository you want to work on:
 
