@@ -41,7 +41,7 @@ independent.
 - Create separate acceptance issues for other cases, such as interruption and
   recovery, with the fixtures needed for that case.
 
-Read `docs/agents/triage-labels.md` before applying labels.
+Read the [triage label guide](triage-labels.md) before applying labels.
 
 ### Test branch and execution
 
