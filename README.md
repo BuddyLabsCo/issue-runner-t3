@@ -41,4 +41,6 @@ In the conversation for the repository you want to work on:
 2. `$issue-runner-t3 init` — configure the Project under `~/.issue-runner-t3/runner` and review its User Prompts.
 3. `$issue-runner-t3 run` — choose Issues or Documentation Maintenance and launch Runner in the current conversation's terminal.
 
+Use `$issue-runner-t3 cleanup` to delete Project files, including saved Run state, while preserving `config.yaml` and `prompts`.
+
 See the [code architecture](docs/code-architecture.md) for module ownership and the [T3 protocol](docs/t3-protocol.md) for native interfaces and interaction sequences.
