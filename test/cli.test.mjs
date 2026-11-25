@@ -156,7 +156,13 @@ test("installed CLI offers help and version without credentials", async () => {
   );
   const version = await cli(["--version"]);
   assert.equal(version.code, 0, version.output);
-  assert.match(version.output, /issue-runner-t3 .*core 1\.0\.10/);
+  const manifest = JSON.parse(
+    await readFile(join(packageRoot, "package.json"), "utf8"),
+  );
+  assert.equal(
+    version.output.trim(),
+    `issue-runner-t3 ${manifest.version} (core ${manifest.dependencies["issue-runner-core"]})`,
+  );
 });
 
 test("installed credential storage can save and read a private credential", () => {
@@ -681,24 +687,52 @@ test("exact resume validates the saved thread before unarchive, rename or input"
   }
 });
 
-async function coreFixture() {
-  const project = join(launch, "demo");
+async function gitFixture() {
+  const origin = join(launch, "origin");
   const checkout = join(launch, "checkout");
+  const git = (cwd, ...args) =>
+    execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+    }).trim();
+  await mkdir(checkout);
+  git(checkout, "init", "-b", "main");
+  git(checkout, "config", "user.name", "Fixture");
+  git(checkout, "config", "user.email", "fixture@example.invalid");
+  git(checkout, "config", "commit.gpgsign", "false");
+  git(checkout, "commit", "--allow-empty", "-m", "Initial commit");
+  git(launch, "clone", "--bare", checkout, origin);
+  git(checkout, "remote", "add", "origin", origin);
+  const worktree = () =>
+    git(checkout, "worktree", "list", "--porcelain", "-z")
+      .split("\0")
+      .filter((field) => field.startsWith("worktree "))[1]
+      ?.slice("worktree ".length);
+  const commit = async (worktree, message) => {
+    await writeFile(join(worktree, "fixture.txt"), message);
+    git(worktree, "add", "fixture.txt");
+    git(worktree, "commit", "-m", message);
+    return { sha: git(worktree, "rev-parse", "HEAD"), message };
+  };
+  return { checkout, worktree, commit };
+}
+
+async function coreFixture() {
+  const { checkout, worktree, commit } = await gitFixture();
+  const project = join(launch, "demo");
   const commands = join(launch, "commands");
   const stateFile = join(launch, "fixture.json");
   const log = join(launch, "run.log");
-  await mkdir(checkout);
   await mkdir(commands);
-  await writeFile(stateFile, JSON.stringify({ checkout }));
-  for (const name of ["git", "gh"]) {
-    const dest = join(commands, name);
-    await copyFile(
-      new URL("./fixtures/core-command.mjs", import.meta.url),
-      dest,
-    );
-    await chmod(dest, 0o755);
-  }
-  const fixture = async () => JSON.parse(await readFile(stateFile, "utf8"));
+  await writeFile(stateFile, "{}");
+  const dest = join(commands, "gh");
+  await copyFile(new URL("./fixtures/core-command.mjs", import.meta.url), dest);
+  await chmod(dest, 0o755);
+  const fixture = async () => ({
+    ...JSON.parse(await readFile(stateFile, "utf8")),
+    worktree: worktree(),
+  });
   const checkpoint = async () => {
     const dir = join(project, "recovery");
     const file = (await readdir(dir)).find((name) => name.endsWith("-42.json"));
@@ -751,7 +785,7 @@ async function coreFixture() {
         FIXTURE_STATE: stateFile,
       },
     });
-  return { log, fixture, checkpoint, initialize, runCli, stateFile };
+  return { log, fixture, checkpoint, initialize, runCli, commit };
 }
 
 const receipt = ["receipt"];
@@ -1601,16 +1635,12 @@ test(
   "Core Review fix reopens the implementation thread with its history and updated stage title",
   { skip: process.platform === "win32" },
   async () => {
-    const { log, fixture, checkpoint, initialize, runCli, stateFile } =
+    const { log, fixture, checkpoint, initialize, runCli, commit } =
       await coreFixture();
     const projectId = "launcher-project";
     const threads = new Map();
-    const implementation = {
-      sha: "b".repeat(40),
-      message: "Implement fixture",
-    };
-    const fix = { sha: "c".repeat(40), message: "Fix Review finding" };
     let child,
+      fix,
       fixed = false,
       secondReview = false;
     const saveHandoff = async (path, result) => {
@@ -1670,9 +1700,9 @@ test(
         thread.history.push(args.message);
         if (saved.phase === "implementing") {
           assert.equal(args.threadId, "implementation");
-          await writeFile(
-            stateFile,
-            JSON.stringify({ ...(await fixture()), commits: [implementation] }),
+          const implementation = await commit(
+            thread.worktreePath,
+            "Implement fixture",
           );
           await saveHandoff(saved.invocation.path, {
             outcome: "committed",
@@ -1705,13 +1735,7 @@ test(
             model: "fixture-model",
             options: [{ id: "reasoningEffort", value: "high" }],
           });
-          await writeFile(
-            stateFile,
-            JSON.stringify({
-              ...(await fixture()),
-              commits: [implementation, fix],
-            }),
-          );
+          fix = await commit(thread.worktreePath, "Fix Review finding");
           await saveHandoff(saved.reviews[0].fix.invocation.path, {
             outcome: "committed",
             summary: "Fixed",
