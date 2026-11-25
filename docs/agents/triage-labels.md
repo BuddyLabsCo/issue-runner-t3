@@ -30,3 +30,5 @@ Reserve `e2e-epic` for acceptance cases and `e2e-test` for fixtures.
 
 Follow `docs/agents/issue-tracker.md` for case setup, test branches, execution,
 and defect reporting.
+
+Run `gh label list` to see the labels available in this repository.
