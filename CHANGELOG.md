@@ -2,6 +2,8 @@
 
 ## 0.1.0
 
+- chore: [issue-29] update issue-runner-core to 1.0.12 (#30)
+- chore: propose release v0.1.0 (#28)
 - feat: [issue-26] migrate CI and release automation to T3 (#27)
 - feat: [issue-15] add companion setup and launch skill (#25)
 - fix: [issue-14] recover thread closure at Operator Pause (#24)
