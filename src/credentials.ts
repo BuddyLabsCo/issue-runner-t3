@@ -112,7 +112,8 @@ function windowsAcl(path: string, script: string) {
     ],
     {
       env: { ...process.env, ISSUE_RUNNER_T3_CREDENTIAL_PATH: path },
-      stdio: "ignore",
+      stdio: ["ignore", "ignore", "pipe"],
+      encoding: "utf8",
     },
   );
 }
@@ -143,6 +144,7 @@ export async function requireCredential(endpoint: string): Promise<Credential> {
     const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
     throw new Error(
       `${missing ? "Missing credentials" : "Cannot read private credentials"} for ${endpoint}. Run ${loginCommand(endpoint)}.`,
+      { cause: error },
     );
   }
   return validateCredential(endpoint, credential);
@@ -198,11 +200,12 @@ export async function saveCredential(
     if (process.platform === "win32") setPrivateWindowsAcl(temporary, false);
     validateCredential(endpoint, credential);
     await rename(temporary, path);
-  } catch {
+  } catch (error) {
     // Storage setup can consume the remaining lifetime of a short-lived token.
     validateCredential(endpoint, credential);
     throw new Error(
       "Unable to save credentials privately under the current user home directory. Check its permissions.",
+      { cause: error },
     );
   } finally {
     await unlink(temporary).catch(() => undefined);

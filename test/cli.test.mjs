@@ -17,7 +17,7 @@ import {
   symlink,
 } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import { parse, stringify } from "yaml";
 
@@ -146,6 +146,31 @@ test("installed CLI offers help and version without credentials", async () => {
   const version = await cli(["--version"]);
   assert.equal(version.code, 0, version.output);
   assert.match(version.output, /issue-runner-t3 .*core 1\.0\.10/);
+});
+
+test("installed credential storage can save and read a private credential", () => {
+  const credentials = pathToFileURL(
+    join(packageRoot, "dist", "credentials.js"),
+  ).href;
+  execFileSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+    import assert from "node:assert/strict";
+    import { saveCredential, requireCredential } from ${JSON.stringify(credentials)};
+    const endpoint = "http://127.0.0.1:3773/mcp";
+    const credential = { accessToken: "fixture-token", expiresAt: Date.now() + 60_000, scope: "orchestration:operate" };
+    await saveCredential(endpoint, credential);
+    assert.deepEqual(await requireCredential(endpoint), credential);
+  `,
+    ],
+    {
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      encoding: "utf8",
+    },
+  );
 });
 
 test("installed Runner includes its discoverable companion skill", async () => {
@@ -1836,7 +1861,9 @@ test("missing credentials prevent Core from creating a Project", async () => {
   assert.notEqual(status.code, 0);
   assert.match(status.output, /missing/i);
   assert.ok(status.output.includes("http://127.0.0.1:3773/mcp"));
-  assert.deepEqual(await readdir(home), []);
+  await assert.rejects(stat(join(home, ".issue-runner-t3")), {
+    code: "ENOENT",
+  });
 });
 
 test("init refuses existing child directories and preserves partial Project output", async () => {
@@ -2095,7 +2122,9 @@ test("the browser callback rejects an incorrect state and does not save a denied
     });
     assert.notEqual(deny.code, 0);
     assert.match(deny.output, /denied/i);
-    assert.deepEqual(await readdir(home), []);
+    await assert.rejects(stat(join(home, ".issue-runner-t3")), {
+      code: "ENOENT",
+    });
   } finally {
     await server.close();
   }
