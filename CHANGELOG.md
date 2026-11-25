@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2
+
+- chore: [issue-42] update issue-runner-core to 1.0.13 (#43)
+- fix: [issue-35] refine companion skill workflow (#36)
+
 ## 0.1.1
 
 - chore: [issue-29] update issue-runner-core to 1.0.12 (#30)
