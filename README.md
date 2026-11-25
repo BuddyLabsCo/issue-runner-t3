@@ -2,12 +2,43 @@
 
 Deliver GitHub Issues from native T3 Code task threads using [Issue Runner Core](https://github.com/BuddyLabsCo/issue-runner-core).
 
-Install the [companion skill](skills/issue-runner-t3/SKILL.md) by copying the `skills/issue-runner-t3` directory into the skill directory of your T3 conversation's provider. The npm package also includes this directory, available under `$(npm root -g)/issue-runner-t3/skills` after a global install (use the equivalent path on Windows). Select the skill from T3's `$` menu.
+## Prerequisites
+
+Meet the [Core prerequisites](https://github.com/BuddyLabsCo/issue-runner-core/blob/main/README.md#prerequisites), replacing the terminal multiplexer and Agent CLI requirements with these T3-specific checks:
+
+- **T3 Code:** the `t3` CLI on `PATH` and at least one available, authenticated provider with advertised models (`orchestrator_capabilities`, `canRunChildTask: true`). Configure providers in T3 settings.
+- **Runner:** check `issue-runner-t3 --version`; install with `npm install --global issue-runner-t3` if missing.
+
+### Install the companion skill
+
+Install the [companion skill](skills/issue-runner-t3/) in your T3 provider's skill directory.
+
+### MCP URL
+
+Use the current T3 Server's loopback address followed by `/mcp`. The runtime record is `userdata/server-runtime.json` under `T3CODE_HOME` (default `~/.t3`). The default URL is `http://127.0.0.1:3773/mcp`; see [T3's MCP URL instructions](https://github.com/pingdotgg/t3code/blob/main/docs/user/outside-agents.md#get-the-mcp-url) for other addresses.
+
+### MCP authorization
+
+Check authorization:
+
+```bash
+issue-runner-t3 auth status
+```
+
+If access is missing or invalid, sign in and approve the browser request:
+
+```bash
+issue-runner-t3 auth login
+```
+
+For a nondefault endpoint, append its URL to both commands and reuse it when initializing the Project.
+
+## Setup and launch
 
 In the conversation for the repository you want to work on:
 
 1. `$issue-runner-t3 setup` — check the host and credentials, then approve any repairs, including installing Runner if needed.
-2. `$issue-runner-t3 init` — choose a Launch Directory, configure the Project, and review its User Prompts.
-3. `$issue-runner-t3 run` — choose Issues or Documentation Maintenance and review the launch command.
+2. `$issue-runner-t3 init` — configure the Project under `~/.issue-runner-t3/runner` and review its User Prompts.
+3. `$issue-runner-t3 run` — choose Issues or Documentation Maintenance and launch Runner in the current conversation's terminal.
 
-Paste the approved command into that conversation's integrated terminal. Runner prints each assignment's stage, T3 thread ID, and handoff path.
+See the [code architecture](docs/code-architecture.md) for module ownership and the [T3 protocol](docs/t3-protocol.md) for native interfaces and interaction sequences.
