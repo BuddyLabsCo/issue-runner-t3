@@ -25,6 +25,8 @@ if (tool === "git") {
     save();
   } else if (args.join(" ") === "rev-parse --show-toplevel")
     console.log(process.cwd());
+  else if (args.join(" ") === "rev-parse HEAD")
+    console.log(state.commits?.at(-1)?.sha ?? base);
   else if (args.join(" ") === "branch --show-current")
     console.log(state.branch);
   else if (args[0] === "merge-base") {

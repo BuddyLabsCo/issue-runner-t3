@@ -156,7 +156,7 @@ test("installed CLI offers help and version without credentials", async () => {
   );
   const version = await cli(["--version"]);
   assert.equal(version.code, 0, version.output);
-  assert.match(version.output, /issue-runner-t3 .*core 1\.0\.10/);
+  assert.match(version.output, /issue-runner-t3 .*core 1\.0\.12/);
 });
 
 test("installed credential storage can save and read a private credential", () => {
