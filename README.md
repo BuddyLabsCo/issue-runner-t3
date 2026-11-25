@@ -35,6 +35,8 @@ For a nondefault endpoint, append its URL to both commands and reuse it when ini
 
 ## Setup and launch
 
+Check the host before initializing a Project.
+
 In the conversation for the repository you want to work on:
 
 1. `$issue-runner-t3 setup` — check the host and credentials, then approve any repairs, including installing Runner if needed.
