@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { after, before, beforeEach, test } from 'node:test';
 import { parse, stringify } from 'yaml';
 
-let root, home, launch, bin;
+let root, home, launch, bin, packageRoot;
 before(async () => {
   root = await mkdtemp(resolve('.test-'));
   // npm 11 exports global allow-scripts settings to lifecycle children, but scoped installs reject that flag.
@@ -21,8 +21,9 @@ before(async () => {
     : execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, { ...options, shell: process.platform === 'win32' });
   const [pack] = JSON.parse(npm(['pack', '--ignore-scripts', '--json', '--pack-destination', root]));
   npm(['install', '--global', '--offline', '--ignore-scripts', '--no-audit', '--no-fund', '--prefix', join(root, 'install'), join(root, pack.filename)]);
+  packageRoot = join(root, 'install', ...(process.platform === 'win32' ? [] : ['lib']), 'node_modules', 'issue-runner-t3');
   bin = process.platform === 'win32'
-    ? join(root, 'install', 'node_modules', 'issue-runner-t3', 'dist', 'cli.js')
+    ? join(packageRoot, 'dist', 'cli.js')
     : join(root, 'install', 'bin', 'issue-runner-t3');
   if (process.platform === 'win32') await stat(join(root, 'install', 'issue-runner-t3.cmd'));
 });
@@ -81,7 +82,6 @@ test('installed CLI offers help and version without credentials', async () => {
 });
 
 test('installed Runner includes its discoverable companion skill', async () => {
-  const packageRoot = join(root, 'install', ...(process.platform === 'win32' ? [] : ['lib']), 'node_modules', 'issue-runner-t3');
   const source = await readFile(join(packageRoot, 'skills', 'issue-runner-t3', 'SKILL.md'), 'utf8');
   const [, metadata] = source.split('---');
   assert.equal(parse(metadata).name, 'issue-runner-t3');
@@ -492,7 +492,7 @@ for (const scenario of scenarios) test(`native task thread: ${scenario.name}`, {
       assert.equal(saved.roles.implement.sessionid, id);
       assert.equal(saved.phase, 'implementing');
       assert.ok(liveOutput.includes(`Issue #42 implement sessionid=${id} handoff=${saved.invocation.path}`), liveOutput);
-      const template = await readFile(join(root, 'install', 'lib', 'node_modules', 'issue-runner-t3', 'node_modules', 'issue-runner-core', 'prompts', 'implement.md'), 'utf8');
+      const template = await readFile(join(packageRoot, 'node_modules', 'issue-runner-core', 'prompts', 'implement.md'), 'utf8');
       assert.equal(args.message, template.trimEnd().replace('{{issue}}', '42').replace('{{instructions}}', marker).replace('{{path}}', JSON.stringify(saved.invocation.path)));
       assert.equal(saved.probe, undefined);
       if (reply === 'reject') return { _tag: 'OrchestratorMcpFailure', code: 'thread_not_sendable', message: 'Thread cannot receive messages.' };
@@ -604,7 +604,7 @@ for (const mode of ['recover-handoff', 'recover-enter']) test(`fresh CLI resumes
       assert.equal(saved.roles.implement.sessionid, id);
       assert.equal(saved.phase, 'implementing');
       assert.ok(liveOutput.includes(`Issue #42 implement sessionid=${id} handoff=${saved.invocation.path}`), liveOutput);
-      const template = await readFile(join(root, 'install', 'lib', 'node_modules', 'issue-runner-t3', 'node_modules', 'issue-runner-core', 'prompts', 'implement.md'), 'utf8');
+      const template = await readFile(join(packageRoot, 'node_modules', 'issue-runner-core', 'prompts', 'implement.md'), 'utf8');
       assert.equal(args.message, history.length ? 'continue' : template.trimEnd().replace('{{issue}}', '42').replace('{{instructions}}', marker).replace('{{path}}', JSON.stringify(saved.invocation.path)));
       assert.equal(busy, false);
       assert.equal(saved.probe, undefined);
@@ -961,7 +961,7 @@ test('custom-only browser login, status, and init use the Core templates and ret
     const init = await cli(initArgs);
     assert.equal(init.code, 0, init.output);
     assert.ok(!init.output.includes(server.token));
-    const template = await readFile(join(root, 'install', ...(process.platform === 'win32' ? [] : ['lib']), 'node_modules', 'issue-runner-t3', 'node_modules', 'issue-runner-core', 'templates', 'config.yaml'), 'utf8');
+    const template = await readFile(join(packageRoot, 'node_modules', 'issue-runner-core', 'templates', 'config.yaml'), 'utf8');
     const expected = parse(template);
     expected.terminalPlugins.mcpUrl = server.endpoint;
     const config = await readFile(join(launch, 'authorized', 'config.yaml'), 'utf8');
@@ -1001,7 +1001,7 @@ test('init refuses existing child directories and preserves partial Project outp
     assert.deepEqual(await readdir(existing), ['notes.md']);
     assert.equal(await readFile(join(existing, 'notes.md'), 'utf8'), 'Operator work');
 
-    const template = join(root, 'install', ...(process.platform === 'win32' ? [] : ['lib']), 'node_modules', 'issue-runner-t3', 'node_modules', 'issue-runner-core', 'templates', 'prompts', 'review.md');
+    const template = join(packageRoot, 'node_modules', 'issue-runner-core', 'templates', 'prompts', 'review.md');
     await rename(template, `${template}.unavailable`);
     try {
       const failed = await init('partial');
