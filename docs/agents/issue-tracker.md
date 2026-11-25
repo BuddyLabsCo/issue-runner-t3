@@ -104,3 +104,6 @@ epic outside the fixture hierarchy so `--parent` discovery selects test work.
 - **Title** — follows the Conventional Commits spec in the form
   `<type>: [issue-<issue-number>] <subject>`, for example `fix: [issue-42] correct retry backoff`.
 - **Description** — must end with `Closes #<issue-number>`
+
+Automated recurring release proposals on `auto-release` are an exception: use
+`chore: propose release v<version>` without an issue number or closing reference.
