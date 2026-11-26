@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import fs, { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -43,7 +44,7 @@ async function taskThread(home) {
   let chunks = new Map();
   let pending;
   let nextContinuation;
-  let unavailable = false;
+  let observationFailure;
   const seen = [];
   const sends = [];
   const server = await substitute(async (name, args, authorization) => {
@@ -54,9 +55,10 @@ async function taskThread(home) {
         if (!args.itemId && args.beforePosition === undefined) {
           pending = Promise.withResolvers();
           await pending.promise;
-          if (unavailable) {
-            unavailable = false;
-            return { code: "orchestration_error", message: "Unavailable" };
+          if (observationFailure) {
+            const { response } = observationFailure;
+            observationFailure = undefined;
+            return response;
           }
         } else if (nextContinuation) {
           const update = nextContinuation;
@@ -122,8 +124,12 @@ async function taskThread(home) {
     onContinuation(update) {
       nextContinuation = update;
     },
-    failNext() {
-      unavailable = true;
+    failNext(disconnect = false) {
+      observationFailure = {
+        response: disconnect
+          ? undefined
+          : { code: "orchestration_error", message: "Unavailable" },
+      };
     },
     set(nextStatus, runIds, messages, nextChunks = new Map()) {
       status = nextStatus;
@@ -436,6 +442,7 @@ test("observation loss prevents adopting a stale active Run on replacement", asy
 function clock(t) {
   let now = Math.ceil(performance.now());
   let scheduled;
+  let polling;
   const clear = globalThis.clearTimeout;
   t.mock.method(performance, "now", () => now);
   t.mock.method(globalThis, "setTimeout", (callback, ms, ...args) => {
@@ -455,7 +462,7 @@ function clock(t) {
     if (scheduled && scheduled.due <= now) {
       const { callback } = scheduled;
       scheduled = undefined;
-      void callback();
+      polling = callback();
       return true;
     }
     return false;
@@ -467,12 +474,48 @@ function clock(t) {
   return {
     tick,
     settle,
+    waitForPoll: () => polling,
     async observe(f, ms) {
       assert.ok(tick(ms), "Expected a fresh Thread observation");
       await settle(f);
     },
   };
 }
+
+test("replacement adopts an active Run discovered when a continuation invalidates the previous page", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t);
+  await f.assign("first");
+  f.set(
+    "completed",
+    ["old"],
+    [
+      reply("old", "split", 0, "[action", {
+        textTruncated: true,
+        nextTextOffset: 7,
+      }),
+    ],
+  );
+  f.onContinuation(() =>
+    f.set(
+      "running",
+      ["active", "old"],
+      [],
+      new Map([["split", reply("old", "split", 0, " required]")]]),
+    ),
+  );
+  await time.observe(f, 5000);
+  assert.ok(f.seen.some((args) => args.itemId === "split"));
+  assert.equal(f.confirmations.status.active, undefined);
+  await f.assign("replacement");
+  f.set(
+    "completed",
+    ["active", "old"],
+    [reply("active", "marker", 1, "[action required] adopted Run")],
+  );
+  await time.observe(f, 10000);
+  assert.ok(f.confirmations.status.active);
+});
 
 test("recovers a missing handoff once, via Core queue delivery, after a full delay", async (t) => {
   const time = clock(t);
@@ -643,22 +686,33 @@ test("handoff appearance at expiry cancels recovery and observing existence rese
 
 test("a file-access error at expiry invalidates the delay until absence is confirmed again", async (t) => {
   const time = clock(t);
+  const errors = t.mock.method(console, "error", () => {});
   const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 5 });
   const file = await f.assign("first");
   f.set("completed", ["run"], []);
   await time.observe(f, 5000);
-  try {
-    await symlink(file, file, "file");
-  } catch (error) {
-    if (process.platform === "win32" && error.code === "EPERM") {
-      t.skip("Windows symlink creation requires developer mode or privilege");
-      return;
-    }
-    throw error;
-  }
+  let inaccessible = true;
+  const originalAccess = fs.access;
+  const access = t.mock.method(fs, "access", async (path, ...args) => {
+    if (path === file && inaccessible)
+      throw Object.assign(new Error("Access denied"), { code: "EACCES" });
+    return originalAccess(path, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    access.mock.restore();
+    syncBuiltinESMExports();
+  });
   await time.observe(f, 5000);
   assert.equal(f.requests.length, 0);
-  await unlink(file);
+  assert.equal(time.tick(9999), false);
+  await time.observe(f, 1);
+  assert.equal(f.requests.length, 0);
+  assert.deepEqual(
+    errors.mock.calls.map(({ arguments: args }) => args[0]),
+    ["Missing handoff recovery check failed; retrying in 10 seconds."],
+  );
+  inaccessible = false;
   await time.observe(f, 10000);
   assert.equal(f.requests.length, 0);
   await time.observe(f, 5000);
@@ -668,19 +722,40 @@ test("a file-access error at expiry invalidates the delay until absence is confi
 
 test("an unavailable expiry observation cancels the delay; reconnect waits the full interval", async (t) => {
   const time = clock(t);
-  const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 5 });
+  const errors = t.mock.method(console, "error", () => {});
+  const f = await fixture(t, { retryLimit: 2, handoffRecoveryDelaySeconds: 5 });
   await f.assign("first");
   f.set("completed", ["run"], []);
   await time.observe(f, 5000);
-  f.failNext();
   await time.observe(f, 5000);
-  assert.equal(f.requests.length, 0);
-  assert.equal(time.tick(9999), false);
-  await time.observe(f, 1);
-  assert.equal(f.requests.length, 0);
-  await time.observe(f, 5000);
-  await until(() => f.sends.length === 2);
   await f.waitForRequests(1);
+  f.set("completed", ["new", "run"], []);
+  await time.observe(f, 5000);
+  f.failNext(true);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 1);
+  for (let retry = 0; retry < 3; retry++) {
+    assert.equal(time.tick(9999), false);
+    if (retry < 2) f.failNext();
+    await time.observe(f, 1);
+    assert.equal(f.requests.length, 1);
+  }
+  await time.observe(f, 5000);
+  await f.waitForRequests(2);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.sends.length, 3);
+  assert.deepEqual(
+    errors.mock.calls.map(({ arguments: args }) => args[0]),
+    [
+      "Missing handoff recovery attempt 1/2.",
+      "T3 observation lost; retrying in 10 seconds.",
+      "T3 observation reconnect failed; retrying in 10 seconds.",
+      "Missing handoff recovery attempt 2/2.",
+      "Missing handoff recovery budget exhausted.",
+    ],
+  );
 });
 
 test("pausing at expiry cancels recovery and Enter waits again without restoring the attempt budget", async (t) => {
@@ -701,8 +776,17 @@ test("pausing at expiry cancels recovery and Enter waits again without restoring
     [reply("two", "marker", 0, "[action required] wait")],
   );
   await time.observe(f, 5000);
-  assert.ok(f.confirmations.status.active);
+  const confirmation = f.confirmations.status.active;
+  assert.ok(confirmation);
+  f.failNext(true);
   await time.observe(f, 5000);
+  assert.equal(time.tick(9999), false);
+  f.failNext();
+  await time.observe(f, 1);
+  assert.equal(time.tick(9999), false);
+  await time.observe(f, 1);
+  assert.deepEqual(f.confirmations.status.active, confirmation);
+  assert.deepEqual(f.confirmations.status.pending, []);
   assert.equal(f.requests.length, 1);
   f.input.write("\n");
   await until(() => !f.confirmations.status.active);
@@ -758,8 +842,14 @@ test("an in-flight Core request settles without replay and a rejection disables 
   await time.observe(f, 5000);
   await time.observe(f, 0);
   assert.equal(f.requests.length, 1);
-  await f.assign("replacement");
+  f.failNext(true);
   await time.observe(f, 5000);
+  assert.equal(time.tick(9999), false);
+  f.failNext();
+  await time.observe(f, 1);
+  await f.assign("replacement");
+  assert.equal(time.tick(9999), false);
+  await time.observe(f, 1);
   await time.observe(f, 5000);
   assert.equal(f.requests.length, 1);
   submission.reject(new Error("Core rejected input"));
@@ -789,6 +879,51 @@ for (const stop of ["Runner cancellation", "Enhancement stop"]) {
     assert.equal(time.tick(5000), false);
     assert.equal(f.seen.length, reads);
     assert.equal(f.requests.length, 0);
+  });
+}
+
+for (const action of [
+  "Runner cancellation",
+  "Enhancement stop",
+  "Assignment replacement",
+]) {
+  test(`${action} prevents further handoff checks after an in-progress check settles`, async (t) => {
+    const time = clock(t);
+    const f = await fixture(t, { handoffRecoveryDelaySeconds: 0 });
+    const file = await f.assign("first");
+    f.set(
+      "completed",
+      ["run"],
+      [reply("run", "marker", 0, "[action required]")],
+    );
+    const pending = Promise.withResolvers();
+    let accesses = 0;
+    const originalAccess = fs.access;
+    const access = t.mock.method(fs, "access", async (path, ...args) => {
+      if (path === file && ++accesses === 1) await pending.promise;
+      return originalAccess(path, ...args);
+    });
+    syncBuiltinESMExports();
+    t.after(() => {
+      access.mock.restore();
+      syncBuiltinESMExports();
+      pending.resolve();
+    });
+
+    assert.ok(time.tick(5000));
+    await f.releaseObservation();
+    await until(() => accesses === 1);
+    if (action === "Runner cancellation") f.controller.abort();
+    else if (action === "Enhancement stop") await f.stopEnhancement();
+    else await f.assign("replacement");
+    pending.resolve();
+    await time.waitForPoll();
+
+    assert.equal(accesses, 1);
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.confirmations.status.active, undefined);
+    if (action === "Assignment replacement") await time.observe(f, 5000);
+    else assert.equal(time.tick(10000), false);
   });
 }
 
@@ -849,6 +984,44 @@ test("recovery settings reject invalid values at the public factory", async (t) 
       /handoffRecoveryDelaySeconds must be finite nonnegative seconds/,
     );
   }
+  for (const value of ["debug", "", false, null]) {
+    await assert.rejects(
+      enhancement.createEnhancement(io, () => {}, context, { logLevel: value }),
+      /logLevel must be error or info/,
+    );
+  }
+});
+
+test("info logging reports recovery timer scheduling, cancellation and expiry", async (t) => {
+  const time = clock(t);
+  const errors = t.mock.method(console, "error", () => {});
+  const f = await fixture(t, {
+    retryLimit: 1,
+    handoffRecoveryDelaySeconds: 10,
+    logLevel: "info",
+  });
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  f.set("running", ["new", "run"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  f.set("completed", ["new", "run"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  await f.waitForRequests(1);
+  assert.deepEqual(
+    errors.mock.calls.map(({ arguments: args }) => args[0]),
+    [
+      "Missing handoff recovery timer scheduled.",
+      "Missing handoff recovery timer cancelled.",
+      "Missing handoff recovery timer scheduled.",
+      "Missing handoff recovery timer expired.",
+      "Missing handoff recovery attempt 1/1.",
+      "Missing handoff recovery budget exhausted.",
+    ],
+  );
 });
 
 test("replacement during an expiry read cannot reuse the old delay", async (t) => {
@@ -881,6 +1054,9 @@ test("an in-flight request can settle after Enhancement stop without starting an
   await time.observe(f, 5000);
   await time.observe(f, 0);
   assert.equal(f.requests.length, 1);
+  f.failNext(true);
+  await time.observe(f, 5000);
+  assert.equal(time.tick(9999), false);
   await f.stopEnhancement();
   submission.resolve();
   await f.waitForRequests(1);
