@@ -6,6 +6,7 @@ import {
   type Enhancement,
   type EnhancementContext,
   type TerminalIO,
+  type RequestRecovery,
 } from "issue-runner-core/terminal";
 import { callMcp } from "./authorization.js";
 import { boundTabs } from "./terminal.js";
@@ -38,9 +39,104 @@ async function handoffAbsent(path: string) {
 
 export const createEnhancement: EnhancementModule["createEnhancement"] = async (
   io,
-  _requestRecovery,
+  requestRecovery,
   context,
-) => new T3Enhancement(io, context);
+  config,
+) => {
+  const settings = config === undefined ? {} : record(config);
+  const retryLimit =
+    settings.retryLimit === undefined ? 3 : settings.retryLimit;
+  const delay =
+    settings.handoffRecoveryDelaySeconds === undefined
+      ? 120
+      : settings.handoffRecoveryDelaySeconds;
+  if (
+    typeof retryLimit !== "number" ||
+    !Number.isInteger(retryLimit) ||
+    retryLimit < 0
+  )
+    throw new Error("retryLimit must be a nonnegative integer.");
+  if (typeof delay !== "number" || !Number.isFinite(delay) || delay < 0)
+    throw new Error(
+      "handoffRecoveryDelaySeconds must be finite nonnegative seconds.",
+    );
+  return new T3Enhancement(
+    io,
+    context,
+    new MissingHandoffRecovery(requestRecovery, retryLimit, delay),
+  );
+};
+
+class MissingHandoffRecovery {
+  private attempts = 0;
+  private disabled = false;
+  private inFlight = false;
+  private pending:
+    { runId: string; status: string; started: number } | undefined;
+
+  constructor(
+    private readonly requestRecovery: RequestRecovery,
+    private readonly retryLimit: number,
+    private readonly delaySeconds: number,
+  ) {}
+
+  cancel() {
+    this.pending = undefined;
+  }
+
+  reset() {
+    this.cancel();
+    this.attempts = 0;
+  }
+
+  remainingDelay() {
+    if (!this.pending) return Infinity;
+    return Math.max(
+      0,
+      this.delaySeconds * 1000 - (performance.now() - this.pending.started),
+    );
+  }
+
+  observe(
+    assignmentId: string,
+    runId: string,
+    status: string,
+    expired: boolean,
+  ) {
+    if (this.inFlight || this.disabled || this.attempts >= this.retryLimit) {
+      this.cancel();
+      return;
+    }
+    if (this.pending?.runId !== runId || this.pending.status !== status) {
+      this.pending = { runId, status, started: performance.now() };
+      return;
+    }
+    if (!expired) return;
+    this.cancel();
+    this.inFlight = true;
+    this.attempts++;
+    // Core owns input serialization and stale Assignment rejection.
+    void this.submit(assignmentId);
+    console.error(
+      `Missing handoff recovery attempt ${this.attempts}/${this.retryLimit}.`,
+    );
+    if (this.attempts === this.retryLimit)
+      console.error("Missing handoff recovery budget exhausted.");
+  }
+
+  private async submit(assignmentId: string) {
+    try {
+      await this.requestRecovery(assignmentId);
+    } catch {
+      this.disabled = true;
+      console.error(
+        "Missing handoff recovery request failed; automatic recovery disabled.",
+      );
+    } finally {
+      this.inFlight = false;
+    }
+  }
+}
 
 class T3Enhancement implements Enhancement {
   private readonly tab: NonNullable<ReturnType<typeof boundTabs.get>>;
@@ -54,10 +150,11 @@ class T3Enhancement implements Enhancement {
   private paused = false;
   private monitoring = false;
   private timer: NodeJS.Timeout | undefined;
-
+  private generation = 0;
   constructor(
     io: TerminalIO,
     private readonly context: EnhancementContext,
+    private readonly recovery: MissingHandoffRecovery,
   ) {
     const tab = boundTabs.get(io);
     if (!tab) throw new Error("Enhancement requires bound T3 Tab I/O.");
@@ -66,6 +163,14 @@ class T3Enhancement implements Enhancement {
       this.controller.signal,
       ...(tab.options.signal ? [tab.options.signal] : []),
     ]);
+    this.signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(this.timer);
+        this.recovery.cancel();
+      },
+      { once: true },
+    );
   }
 
   private current() {
@@ -188,37 +293,60 @@ class T3Enhancement implements Enhancement {
     }
   }
 
+  private async missing(candidate: Assignment) {
+    const absent = await handoffAbsent(
+      resolve(this.context.cwd, candidate.expectedFile),
+    );
+    if (!absent && candidate === this.assignment) {
+      this.recovery.reset();
+    }
+    return absent;
+  }
+
   private async observe() {
+    const generation = this.generation;
     const page = await this.read();
-    const { thread } = page;
     const candidate = this.assignment;
-    if (!candidate) return;
-    const path = resolve(this.context.cwd, candidate.expectedFile);
+    const { thread } = page;
     if (
-      !(await handoffAbsent(path)) ||
-      !this.current() ||
-      candidate !== this.assignment
+      !candidate ||
+      candidate !== this.assignment ||
+      !(await this.missing(candidate))
     )
       return;
     const runId = thread.latestRunId;
+    const status = thread.status;
     if (
       typeof runId !== "string" ||
       thread.activeRunId !== null ||
-      (thread.status !== "completed" && thread.status !== "interrupted") ||
-      this.runAssignments.get(runId) !== candidate.id
+      (status !== "completed" && status !== "interrupted")
     )
       return;
-    const reply = await this.lastReply(page, runId);
-    if (!reply?.text.trimStart().startsWith("[action required]")) return;
-    const identity = JSON.stringify([runId, reply.itemId]);
+    // Run attribution gates Pause, not Missing Handoff Recovery.
+    const reply =
+      this.runAssignments.get(runId) === candidate.id
+        ? await this.lastReply(page, runId)
+        : undefined;
     const wasPaused = this.paused;
     if (
-      this.processedReplies.has(identity) ||
-      !(await handoffAbsent(path)) ||
+      !(await this.missing(candidate)) ||
       !this.current() ||
       candidate !== this.assignment
     )
       return;
+    this.pauseForReply(candidate, runId, reply, wasPaused);
+    return { candidate, generation, runId, status };
+  }
+
+  private pauseForReply(
+    candidate: Assignment,
+    runId: string,
+    reply: Awaited<ReturnType<T3Enhancement["lastReply"]>>,
+    wasPaused: boolean,
+  ) {
+    if (!reply?.text.trimStart().startsWith("[action required]")) return;
+    const identity = JSON.stringify([runId, reply.itemId]);
+    if (this.processedReplies.has(identity)) return;
     this.processedReplies.add(identity);
     if (this.paused || wasPaused) return;
     this.paused = true;
@@ -230,11 +358,23 @@ class T3Enhancement implements Enhancement {
     this.timer = setTimeout(async () => {
       let next = 5000;
       try {
-        if (this.current()) await this.observe();
+        // Only a read started at or after expiry can authorize submission.
+        const expired = this.recovery.remainingDelay() === 0;
+        const observation = this.current() ? await this.observe() : undefined;
+        if (
+          observation &&
+          this.current() &&
+          observation.generation === this.generation &&
+          !this.paused
+        ) {
+          const { candidate, runId, status } = observation;
+          this.recovery.observe(candidate.id, runId, status, expired);
+        } else this.recovery.cancel();
       } catch {
+        this.recovery.cancel();
         next = 10000;
       }
-      this.schedule(next);
+      this.schedule(Math.min(next, Math.ceil(this.recovery.remainingDelay())));
     }, delay);
     this.timer.unref();
   }
@@ -252,16 +392,21 @@ class T3Enhancement implements Enhancement {
   onAssignment(next: Assignment) {
     if (this.signal.aborted) return;
     this.assignment = next;
+    this.generation++;
+    this.recovery.reset();
     if (this.activeRun) this.runAssignments.set(this.activeRun, next.id);
     this.paused = false;
     this.processedReplies.clear();
   }
   async enhancementResume(assignmentId: string) {
-    if (this.assignment?.id === assignmentId) this.paused = false;
+    if (this.assignment?.id === assignmentId) {
+      this.paused = false;
+      this.generation++;
+      this.recovery.cancel();
+    }
   }
   async stop() {
     this.controller.abort();
-    clearTimeout(this.timer);
     this.assignment = undefined;
     this.activeRun = undefined;
     this.paused = false;

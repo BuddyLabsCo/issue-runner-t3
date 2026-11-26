@@ -11,7 +11,7 @@ The T3 plugin targets [T3 Code](https://github.com/pingdotgg/t3code) v0.1.11 and
 | `t3_project_list` | `limit: 1` | Check authorization with an authenticated read |
 | `t3_thread_read` | `threadId` | Resolve the launcher's Project and verify saved or owned thread identities and state |
 | `t3_thread_launch` | `projectId`, `title`, `modelSelection`, `workspaceStrategy`, `clientRequestId` | Create an idle task thread in the existing Core Worktree |
-| `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Submit the complete Assignment prompt |
+| `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Submit Assignment and recovery prompts from Core |
 | `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Queue diagnostic advice in the launcher Thread |
 | `t3_queue` | `threadId`, `action: "list"`, `limit: 1` | Check for queued turns before resume or archival |
 | `t3_thread_organize` | `threadId`, `action: "unarchive"` or `"archive"` | Reopen or archive a task thread without deleting its history |
@@ -23,11 +23,33 @@ Runner signs in through T3's [external MCP authorization](https://github.com/pin
 
 `createTab` returns an opaque handle and bound I/O without creating a native thread. The plugin interprets `t3 start --provider <instance-id> --model <model> [--option <id>=<value>]` and `t3 resume {sessionref}` itself. Start maps to `modelSelection: {instanceId, model, options: [{id, value}]}` and `workspaceStrategy: {type: "existing_worktree", worktreePath: cwd}`. The native thread ID becomes Core's `sessionref`; screen reads and key chords are unsupported. Core discovers the bundled Enhancement from the `issue-runner-agent-t3` package root when an Agent uses `agent: t3`. The Enhancement uses the bound Tab I/O to return the exact native thread ID without a readiness probe.
 
-The Enhancement polls the owned Thread with `t3_thread_read` every 5s, or after 10s when observation fails. It tracks Run ownership across Assignment replacements and adopts the latest in-progress Run. For `completed` or `interrupted`, it uses `beforePosition` to find the last assistant message of the current Assignment's latest Run and `itemId` and `textOffset` to read its complete text.
+The Enhancement polls the owned Thread with `t3_thread_read` every 5s, or sooner when a recovery delay expires. After observation fails, it retries after 10s. It tracks Run ownership across Assignment replacements and adopts the latest in-progress Run. For `completed` or `interrupted`, it uses `beforePosition` to find the last assistant message of the current Assignment's latest Run and `itemId` and `textOffset` to read its complete text.
 
 If the reply starts with `[action required]` after leading whitespace and the expected handoff is absent, the Enhancement requests a pause from Core once per Run and Item. It continues observing the Thread and handoff while paused. Only Runner Enter releases an active pause; native questions and approvals stay in T3. Core invalidates confirmations on Assignment completion or replacement, and the Enhancement clears local pause state on replacement or Tab cleanup.
 
 Resume and archival require `activeRunId: null` and status `idle`, `completed`, `failed`, `cancelled`, `interrupted` or `rolled_back`, unless archival is already complete. Identity and queue checks are preflight checks, not atomic with mutations.
+
+### Missing handoff recovery
+
+The Enhancement considers recovery only when the owned Thread reports `completed` or `interrupted` with no active Run. The expected handoff must be absent and the Assignment must be unpaused. An eligible terminal Run from the preceding Assignment can start a delay for a replacement that has not started a Run. Its reply cannot pause that replacement.
+
+The Enhancement owns recovery eligibility, the delay, and the attempt budget:
+
+- A changed Run or status, observation failure, file-access error, handoff appearance, pause, Assignment replacement, Runner cancellation or Enhancement stop cancels a pending delay.
+- When eligibility returns, including after Runner Enter, the Enhancement waits a full new delay.
+- At expiry, it reads the owned Thread again and rechecks the Assignment, Run, status, handoff absence, pause state and budget before calling Core's `requestRecovery`.
+- At most one request is pending or in flight. A request consumes an attempt even if Core treats it as stale; an in-flight request can settle without interruption.
+
+Core owns recovery wording, serialized input, stale-Assignment rejection and handoff validation. The Adapter queues Core's recovery prompt in the owned task Thread. A manual Run may start between revalidation and delivery; those operations are not atomic.
+
+The Enhancement resets the budget when it observes the handoff or the Assignment changes, not when a new Run starts or the operator presses Enter. Exhaustion produces one notice and stops recovery requests until the budget resets. Monitoring continues without an Operator Pause. A genuine Core rejection disables automatic recovery for the Enhancement instance without replay.
+
+Configure the recovery settings under `terminalPlugins.enhancements` in the Project's `config.yaml`:
+
+| Setting | Default | Valid values |
+| --- | --- | --- |
+| `retryLimit` | `3` | Nonnegative integer; `0` disables automatic recovery but keeps Enhancement Pause active |
+| `handoffRecoveryDelaySeconds` | `120` | Finite nonnegative seconds |
 
 ### Skill launcher
 

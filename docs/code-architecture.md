@@ -32,7 +32,7 @@ This map describes where code belongs. The [Core integration contract](https://g
 | --- | --- |
 | `src/cli.ts` | Parse Runner commands, resolve the effective MCP endpoint, and prepare T3-specific Project settings. Delegate initialization and workflow execution to Core's `runCli`. |
 | `src/terminal.ts` | Implement Core's terminal contract using native T3 threads. Own task handles, Project and thread identity, start/resume mapping, prompt delivery and archival. |
-| `src/enhancement.ts` | Expose Enhancement Contract v3 at the package root. Resolve readiness from the Adapter’s private Tab state, poll the task Thread, and request Enhancement Pause for attributable Agent replies. |
+| `src/enhancement.ts` | Expose Enhancement Contract v3 at the package root. Resolve readiness from the Adapter's private Tab state. Own task Thread observation, Run attribution, recovery eligibility, delay, budget and cancellation. Request recovery and Enhancement Pause through Core. |
 | `src/pause-guidance.ts` | Observe active Core confirmations without owning input. Queue diagnostics in the launcher Thread and cancel outstanding delivery when the confirmation ends. |
 | `src/authorization.ts` | Connect to the MCP endpoint, make authenticated tool calls, validate authorization and handle timeouts, rejections and retries. |
 | `src/credentials.ts` | Normalize endpoint URLs, store credentials privately per endpoint, and enforce token expiry and granted scope. |
@@ -43,6 +43,6 @@ This map describes where code belongs. The [Core integration contract](https://g
 | `test/` | Verify installed CLI behavior, the adapter contract and Skill helpers. Keep simulated external interfaces under `fixtures/`. |
 | `test/release/` | Verify workflow configuration and release-script behavior using disposable Git repositories and GitHub/npm substitutes in `test/fixtures/`. |
 | `docs/` | Explain the architecture and native protocol. Keep Agent instructions under `docs/agents/`. |
-| Core | Own Issue selection and Batches, Worktrees, Assignment dispatch, checkpoints, handoff verification, GitHub operations, integration and recovery. |
+| Core | Own Issue selection and Batches, Worktrees, Assignment dispatch, checkpoints, handoff verification, GitHub operations and integration. Own recovery wording, stale-Assignment rejection and serialized input. |
 
 Keep T3-specific behavior in the T3 Adapter, Enhancement or Skill. Shared workflow policy belongs to Core. Build output under `dist/` is generated from `src/`, not edited directly.
