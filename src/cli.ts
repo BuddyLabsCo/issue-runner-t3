@@ -10,6 +10,7 @@ import { parse, parseDocument } from "yaml";
 import { checkAuthorization } from "./authorization.js";
 import { defaultEndpoint, normalizeEndpoint } from "./credentials.js";
 import { login } from "./oauth.js";
+import { startPauseGuidance } from "./pause-guidance.js";
 import { createT3Terminal } from "./terminal.js";
 
 const commandName = "issue-runner-t3";
@@ -31,7 +32,10 @@ Options: --help, --version`;
 const authHelp = `Usage: ${commandName} auth <login|status> [mcp-url]\n\nDefault MCP URL: ${defaultEndpoint}`;
 const initHelp = `Usage: ${commandName} init --project <key> [--mcp-url <url>]\n\nCreates a Core Project with config.yaml and three prompts. Sign in to the effective MCP URL first. An explicit MCP URL is saved in terminalPlugins.mcpUrl.`;
 
-async function projectEndpoint(): Promise<string> {
+async function projectSettings(): Promise<{
+  endpoint: string;
+  pauseGuidance?: unknown;
+}> {
   const { values } = parseArgs({
     args,
     options: { project: { type: "string" } },
@@ -45,18 +49,22 @@ async function projectEndpoint(): Promise<string> {
     key === "." ||
     key === ".."
   ) {
-    return normalizeEndpoint();
+    return { endpoint: normalizeEndpoint() };
   }
   let source: string;
   try {
     source = await readFile(join(process.cwd(), key, "config.yaml"), "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT")
-      return normalizeEndpoint();
+      return { endpoint: normalizeEndpoint() };
     throw new Error("Cannot read Project configuration.");
   }
   try {
-    return normalizeEndpoint(parse(source)?.terminalPlugins?.mcpUrl);
+    const config = parse(source)?.terminalPlugins;
+    return {
+      endpoint: normalizeEndpoint(config?.mcpUrl),
+      pauseGuidance: config?.pauseGuidance,
+    };
   } catch {
     throw new Error(
       "Check terminalPlugins.mcpUrl in the Project config.yaml. It must be a valid MCP URL.",
@@ -88,15 +96,27 @@ async function main() {
     else await initializeProject();
     return;
   }
+  let stopGuidance: (() => void) | undefined;
   if (!["--version", "-v"].includes(args[0]) && !helpRequested) {
     if (args[0] === "run" && !process.env.T3CODE_THREAD_ID?.trim()) {
       throw new Error(
         "Start issue-runner-t3 from a T3 Code integrated terminal.",
       );
     }
-    await checkAuthorization(await projectEndpoint());
+    const { endpoint, pauseGuidance } = await projectSettings();
+    await checkAuthorization(endpoint);
+    if (args[0] === "run")
+      stopGuidance = startPauseGuidance(
+        endpoint,
+        process.env.T3CODE_THREAD_ID!,
+        pauseGuidance,
+      );
   }
-  await runCore();
+  try {
+    await runCore();
+  } finally {
+    stopGuidance?.();
+  }
 }
 
 async function initializeProject() {
@@ -108,7 +128,9 @@ async function initializeProject() {
   if (!project) throw new Error(initHelp);
   const custom = values["mcp-url"];
   const endpoint =
-    custom === undefined ? await projectEndpoint() : normalizeEndpoint(custom);
+    custom === undefined
+      ? (await projectSettings()).endpoint
+      : normalizeEndpoint(custom);
   await checkAuthorization(endpoint);
   // Core owns Project creation; the wrapper consumes only its own endpoint option.
   process.argv.splice(2, args.length, "init", `--project=${project}`);

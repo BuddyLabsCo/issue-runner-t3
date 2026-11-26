@@ -438,6 +438,8 @@ await posixTest(
 for (const missing of [
   "dist/cli.js",
   "dist/terminal.js",
+  "dist/pause-guidance.js",
+  "prompts/runner-pause-guidance.md",
   "skills/issue-runner-t3/SKILL.md",
   "skills/issue-runner-t3/scripts/launch-terminal.mjs",
 ]) {
