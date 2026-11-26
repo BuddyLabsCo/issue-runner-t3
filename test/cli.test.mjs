@@ -243,7 +243,7 @@ test("packed Enhancement binds fresh and resumed Tabs and retains only their val
   const archived = [];
   const server = await substitute((name, args) => {
     if (name === "t3_thread_read") {
-      reads.push(args.threadId);
+      if (args.view !== "messages") reads.push(args.threadId);
       return {
         thread: {
           threadId: args.threadId,
@@ -251,9 +251,13 @@ test("packed Enhancement binds fresh and resumed Tabs and retains only their val
           worktreePath: launch,
           activeRunId: null,
           status: "completed",
+          latestRunId: null,
           archived: false,
           title: "resumed",
         },
+        recentRuns: [],
+        items: [],
+        earlierPosition: null,
       };
     }
     if (name === "t3_queue") return { items: [], nextCursor: null };

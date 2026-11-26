@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { getEventListeners } from "node:events";
 import { PassThrough } from "node:stream";
 import {
   setImmediate as turn,
@@ -14,6 +15,7 @@ import {
 } from "../node_modules/issue-runner-core/dist/run/operations.js";
 import { restartUnrecoverable } from "../node_modules/issue-runner-core/dist/run/execution-recovery.js";
 import { startPauseGuidance } from "../dist/pause-guidance.js";
+import { callMcp } from "../dist/authorization.js";
 import { saveCredential } from "../dist/credentials.js";
 import { substitute } from "./fixtures/mcp-substitute.mjs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -94,6 +96,7 @@ async function fixture(t, tty, respond = () => ({}), enabled = undefined) {
   });
   const queue = new TerminalConfirmations(operator, controller.signal);
   return {
+    endpoint,
     input,
     output,
     operator,
@@ -251,6 +254,53 @@ test("uncertain delivery retries with the same request and stops when the confir
   assert.equal(await second, null);
   await delay(5200);
   assert.equal(calls.length, 3);
+});
+
+test("MCP backoff observes the same effective cancellation signal as the request", async (t) => {
+  const { endpoint, calls } = await fixture(
+    t,
+    false,
+    () => ({ code: "orchestration_error", message: "uncertain" }),
+    false,
+  );
+  const retryController = new AbortController();
+  const effectiveController = new AbortController();
+  const pending = callMcp(
+    endpoint,
+    "t3_thread_send",
+    {
+      threadId: "launcher",
+      message: "continue",
+      mode: "queue",
+      clientRequestId: "retry",
+    },
+    {
+      acknowledged: () => true,
+      uncertainEffect: "Delivery uncertain",
+      signal: retryController.signal,
+    },
+    effectiveController.signal,
+  );
+  const rejected = assert.rejects(pending, {
+    name: "AbortError",
+    code: "ABORT_ERR",
+  });
+  try {
+    // Wait until the timer has registered its abort listener, not just the MCP response.
+    await until(() =>
+      [retryController.signal, effectiveController.signal].some(
+        (signal) => getEventListeners(signal, "abort").length,
+      ),
+    );
+    effectiveController.abort(new Error("Operator cancelled"));
+    await rejected;
+    assert.equal(calls.length, 1);
+    assert.equal(retryController.signal.aborted, false);
+  } finally {
+    effectiveController.abort();
+    retryController.abort();
+    await rejected.catch(() => undefined);
+  }
 });
 
 test("delivery rejection is logged once; accepted or late advice cannot answer a confirmation", async (t) => {

@@ -23,6 +23,10 @@ Runner signs in through T3's [external MCP authorization](https://github.com/pin
 
 `createTab` returns an opaque handle and bound I/O without creating a native thread. The plugin interprets `t3 start --provider <instance-id> --model <model> [--option <id>=<value>]` and `t3 resume {sessionref}` itself. Start maps to `modelSelection: {instanceId, model, options: [{id, value}]}` and `workspaceStrategy: {type: "existing_worktree", worktreePath: cwd}`. The native thread ID becomes Core's `sessionref`; screen reads and key chords are unsupported. Core discovers the bundled Enhancement from the `issue-runner-agent-t3` package root when an Agent uses `agent: t3`. The Enhancement uses the bound Tab I/O to return the exact native thread ID without a readiness probe.
 
+The Enhancement polls the owned Thread with `t3_thread_read` every 5s, or after 10s when observation fails. It tracks Run ownership across Assignment replacements and adopts the latest in-progress Run. For `completed` or `interrupted`, it uses `beforePosition` to find the last assistant message of the current Assignment's latest Run and `itemId` and `textOffset` to read its complete text.
+
+If the reply starts with `[action required]` after leading whitespace and the expected handoff is absent, the Enhancement requests a pause from Core once per Run and Item. It continues observing the Thread and handoff while paused. Only Runner Enter releases an active pause; native questions and approvals stay in T3. Core invalidates confirmations on Assignment completion or replacement, and the Enhancement clears local pause state on replacement or Tab cleanup.
+
 Resume and archival require `activeRunId: null` and status `idle`, `completed`, `failed`, `cancelled`, `interrupted` or `rolled_back`, unless archival is already complete. Identity and queue checks are preflight checks, not atomic with mutations.
 
 ### Skill launcher
