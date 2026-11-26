@@ -21,8 +21,8 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 
 ## `$issue-runner-t3 setup`
 
-1. Check the [Issue Runner T3 prerequisites](https://github.com/BuddyLabsCo/issue-runner-t3/blob/main/README.md#prerequisites) using `mcpUrl` where applicable. Keep these checks read-only. Report gaps and unverified permissions. If the legacy `issue-runner-t3` npm package is installed globally, include it in the list of gaps.
-2. Obtain the operator's approval for the repairs and sign-ins needed to address the reported gaps. Once approved, work through every gap in turn. Use the host's installation mechanism for missing tools, run `npm uninstall --global issue-runner-t3` if the legacy package was reported, and guide the operator through any required interactive approvals.
+1. Check the [Issue Runner T3 prerequisites](https://github.com/BuddyLabsCo/issue-runner-t3/blob/main/README.md#prerequisites) without making changes, using `mcpUrl` where applicable. Report gaps and unverified permissions. Flag the legacy `issue-runner-t3` npm package for removal if installed globally.
+2. Get the operator's approval for repairs and sign-ins, then address each reported gap in turn.
 3. Recheck and report remaining blockers. Offer `init` when setup is ready.
 
 ## `$issue-runner-t3 upgrade`
