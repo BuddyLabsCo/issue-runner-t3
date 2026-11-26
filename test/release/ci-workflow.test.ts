@@ -296,7 +296,11 @@ await test("the T3 manifest preserves its CLI and skill package identity", () =>
   assert.equal(manifest.packageManager, "npm@11.6.2");
   assert.equal(manifest.license, "MIT");
   assert.deepEqual(manifest.bin, { "issue-runner-t3": "dist/cli.js" });
-  assert.deepEqual(manifest.files, ["dist", "skills/issue-runner-t3"]);
+  assert.deepEqual(manifest.files, [
+    "dist",
+    "prompts/runner-pause-guidance.md",
+    "skills/issue-runner-t3",
+  ]);
   assert.deepEqual(manifest.repository, {
     type: "git",
     url: "git+https://github.com/BuddyLabsCo/issue-runner-t3.git",

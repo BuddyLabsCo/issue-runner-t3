@@ -767,6 +767,7 @@ async function coreFixture() {
       },
     });
     config.terminalPlugins.agentStartDelay = 0;
+    config.terminalPlugins.pauseGuidance = false;
     await writeFile(configPath, stringify(config));
     await writeFile(join(project, "prompts", "implement.md"), marker);
     await writeFile(
@@ -1416,6 +1417,75 @@ async function waitForOutput(log, pattern, run) {
   }
   assert.fail(`No ${pattern} in output: ${readFileSync(log, "utf8")}`);
 }
+
+test(
+  "installed Runner loads the packaged guidance template and queues advice in its launcher",
+  { skip: process.platform === "win32" },
+  async () => {
+    const { log, initialize, runCli } = await coreFixture();
+    let child;
+    let resolveGuidance;
+    const guidance = new Promise((resolve) => {
+      resolveGuidance = resolve;
+    });
+    const server = await substitute((name, args) => {
+      if (name === "t3_thread_read" && args.threadId === "launcher-thread") {
+        return {
+          thread: { threadId: "launcher-thread", projectId: "project" },
+        };
+      }
+      if (name === "t3_thread_send") {
+        resolveGuidance(args);
+        return {
+          threadId: "launcher-thread",
+          messageId: "diagnostic",
+          runId: "queued-run",
+          delivery: "queued",
+        };
+      }
+      return unauthorized;
+    });
+    try {
+      await initialize(server.endpoint, false, "Implement the fixture.");
+      const configPath = join(launch, "demo", "config.yaml");
+      const config = parse(await readFile(configPath, "utf8"));
+      config.terminalPlugins.pauseGuidance = "false";
+      await writeFile(configPath, stringify(config));
+      const invalid = await runCli();
+      assert.notEqual(invalid.code, 0);
+      assert.match(
+        invalid.output,
+        /terminalPlugins\.pauseGuidance must be a boolean/,
+      );
+      delete config.terminalPlugins.pauseGuidance;
+      await writeFile(configPath, stringify(config));
+      const run = runCli((process) => {
+        child = process;
+      });
+      const args = await Promise.race([guidance, run]);
+      assert.equal(args.threadId, "launcher-thread", JSON.stringify(args));
+      assert.equal(args.mode, "queue");
+      const template = await readFile(
+        join(packageRoot, "prompts", "runner-pause-guidance.md"),
+        "utf8",
+      );
+      const output = readFileSync(log, "utf8");
+      assert.match(output, /Enter to retry, .*q\/EOF to cancel/);
+      assert.equal(
+        args.message,
+        template.replace("<output>", () =>
+          output.split("\n").slice(-15).join("\n"),
+        ),
+      );
+      assert.match(args.message, /Diagnose only; do not take action\./);
+      child.stdin.write("q\n");
+      assert.notEqual((await run).code, 0);
+    } finally {
+      child?.kill("SIGTERM");
+      await server.close();
+    }
+  },
+);
 
 for (const mode of [
   "create auth loss",

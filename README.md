@@ -43,4 +43,10 @@ In the conversation for the repository you want to work on:
 
 Use `$issue-runner-t3 cleanup` to delete Project files, including saved Run state, while preserving `config.yaml` and `prompts`.
 
+### Pause guidance
+
+By default, Runner queues diagnostic advice in the launcher conversation when a terminal confirmation becomes active. The prompt includes the latest 15 lines of Runner output. Choose the confirmation option yourself in the terminal; advice never resolves a pause.
+
+To disable output collection and diagnostic messages, set `terminalPlugins.pauseGuidance` to `false` in the Project's `config.yaml`.
+
 See the [code architecture](docs/code-architecture.md) for module ownership and the [T3 protocol](docs/t3-protocol.md) for native interfaces and interaction sequences.
