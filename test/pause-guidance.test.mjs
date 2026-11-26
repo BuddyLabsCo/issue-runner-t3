@@ -79,6 +79,7 @@ async function fixture(t, tty, respond = () => ({}), enabled = undefined) {
     rendered += chunk;
   });
   const write = output.write;
+  const removeListener = input.removeListener;
   const controller = new AbortController();
   const operator = new TerminalOperator(controller.signal, { input, output });
   const stop = startPauseGuidance(endpoint, "launcher", enabled, {
@@ -106,6 +107,7 @@ async function fixture(t, tty, respond = () => ({}), enabled = undefined) {
     calls,
     stop,
     write,
+    removeListener,
     rendered: () => rendered,
   };
 }
@@ -215,10 +217,8 @@ for (const tty of [false, true]) {
 
 for (const tty of [false, true]) {
   test(`confirmation ended before dispatch or Run exit sends nothing (TTY=${tty})`, async (t) => {
-    const { input, output, operator, calls, stop, write } = await fixture(
-      t,
-      tty,
-    );
+    const { input, output, operator, calls, stop, write, removeListener } =
+      await fixture(t, tty);
     const beforeDispatch = operator.pause(retryMessage);
     input.write("\n");
     assert.equal(await beforeDispatch, "");
@@ -227,6 +227,7 @@ for (const tty of [false, true]) {
     const onExit = operator.pause(retryMessage);
     stop();
     assert.equal(output.write, write);
+    assert.equal(input.removeListener, removeListener);
     input.write("\n");
     assert.equal(await onExit, "");
     await turn();
@@ -309,6 +310,7 @@ test("disabled guidance validates configuration without observing streams", asyn
   const input = new PassThrough();
   const output = new PassThrough();
   const original = output.write;
+  const removeListener = input.removeListener;
   const listeners = t.mock.method(input, "listeners", () =>
     assert.fail("stdin must not be inspected"),
   );
@@ -324,12 +326,14 @@ test("disabled guidance validates configuration without observing streams", asyn
     output,
   });
   assert.equal(output.write, original);
+  assert.equal(input.removeListener, removeListener);
   const operator = new TerminalOperator(undefined, { input, output });
   const waiting = operator.pause(retryMessage);
   input.write("\n");
   assert.equal(await waiting, "");
   stop();
   assert.equal(output.write, original);
+  assert.equal(input.removeListener, removeListener);
   assert.equal(listeners.mock.callCount(), 0);
   assert.equal(input.listenerCount("removeListener"), 0);
   input.destroy();

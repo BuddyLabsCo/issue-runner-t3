@@ -26,6 +26,7 @@ export function startPauseGuidance(
     "utf8",
   );
   const originalWrite = output.write;
+  const originalRemoveListener = input.removeListener;
   const baseline = new Set(input.listeners("data"));
   let recent = "";
   let candidate: Wait["listener"] | undefined;
@@ -58,12 +59,13 @@ export function startPauseGuidance(
     });
   }
 
-  // Core unpipes its input on completion; an unsupported response replaces the
-  // listener within the same turn, before the scheduled reconciliation.
-  function removed(event: string | symbol, listener: Wait["listener"]) {
+  // Node 22 streams can omit the removeListener event when Core unpipes input.
+  // Reconcile after the turn so an unsupported response can replace the listener.
+  input.removeListener = function (event, listener) {
+    const result = originalRemoveListener.call(input, event, listener);
     if (event === "data" && active?.listener === listener) schedule();
-  }
-  input.on("removeListener", removed);
+    return result;
+  };
 
   output.write = function (...args: Parameters<typeof originalWrite>) {
     const result = Reflect.apply(originalWrite, output, args);
@@ -111,7 +113,7 @@ export function startPauseGuidance(
 
   return () => {
     output.write = originalWrite;
-    input.off("removeListener", removed);
+    input.removeListener = originalRemoveListener;
     if (scheduled) clearImmediate(scheduled);
     cancel();
   };
