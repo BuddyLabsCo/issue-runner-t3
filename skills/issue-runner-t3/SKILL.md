@@ -1,13 +1,13 @@
 ---
 name: issue-runner-t3
-description: Manage Issue Runner for the current T3 Code conversation. Use for $issue-runner-t3 setup (host checks and authorization), init (Project configuration and prompts), run (Issue selection and terminal launch), or cleanup (remove Project files except configuration and prompts).
+description: Manage Issue Runner for the current T3 Code conversation. Use for $issue-runner-t3 setup (host checks and authorization), init (Project configuration and prompts), run (Issue selection and terminal launch), upgrade (package and Skill), or cleanup (remove Project files except configuration and prompts).
 ---
 
 # Issue Runner for T3 Code
 
 Prepare the Runner host, initialize a Project, launch Runner, and clean up Project files from the current T3 conversation.
 
-## Prepare project parameters
+## Prepare project parameters (except upgrade)
 
 - `checkout`: absolute T3 project root, not the current Worktree. Resolve via `orchestrator_capabilities` (`parentThreadId`) → `t3_thread_read` (`thread.projectId`) → `t3_project_read` (`workspaceRoot`) and verify it is a Git checkout.
 - `repository`: GitHub `owner/repo` from `git remote get-url origin` in `checkout`; strip `.git` and redact credentials.
@@ -24,6 +24,13 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 1. Read the [Issue Runner T3 prerequisites](https://github.com/BuddyLabsCo/issue-runner-t3/blob/main/README.md#prerequisites). Check each prerequisite using `mcpUrl` where applicable, without changing anything; report gaps and unverified permissions.
 2. Obtain approval for repairs and sign-ins. Use the host's installation mechanism and guide the operator through required approvals.
 3. Recheck and report remaining blockers. Offer `init` when setup is ready.
+
+## `$issue-runner-t3 upgrade`
+
+1. Check latest `issue-runner-agent-t3`, both global packages, CLI links and Skill against the installed latest bundle if available.
+2. If changes are needed, show version/actions. Require approval and confirmation all Runner processes stopped; do not inspect or terminate them.
+3. Uninstall global legacy `issue-runner-t3` if present; install approved exact version globally if needed, including after legacy removal or broken CLI links. Replace the invoked Skill with the bundled Skill.
+4. Stop on failure and report completed/failed actions.
 
 ## `$issue-runner-t3 init`
 

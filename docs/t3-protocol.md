@@ -1,260 +1,185 @@
 # T3 Code protocol
 
-## Native interfaces used
+Native interfaces used by Runner with [T3 Code](https://github.com/pingdotgg/t3code) v0.1.11.
 
-The T3 plugin targets [T3 Code](https://github.com/pingdotgg/t3code) v0.1.11 and implements [Core's terminal contract](https://github.com/BuddyLabsCo/issue-runner-core/blob/main/docs/terminal-contract.md) v2 using native T3 chat threads. The companion Skill separately uses T3's terminal RPC to launch Runner itself. This document describes the implementation, not live acceptance results.
+## MCP
 
-### Task adapter
+[Tool contracts](https://github.com/pingdotgg/t3code/blob/main/packages/contracts/src/orchestratorMcp.ts): Streamable HTTP JSON-RPC, default endpoint `http://127.0.0.1:3773/mcp`. OAuth authorization code with PKCE; scopes `orchestration:read` and `orchestration:operate`. Tool responses use `structuredContent` or JSON in a text result.
 
-| MCP tool | Parameters used | Purpose |
+| Tool | Parameters used | Purpose |
 | --- | --- | --- |
-| `t3_project_list` | `limit: 1` | Check authorization with an authenticated read |
-| `t3_thread_read` | `threadId` | Resolve the launcher's Project and verify saved or owned thread identities and state |
-| `t3_thread_launch` | `projectId`, `title`, `modelSelection`, `workspaceStrategy`, `clientRequestId` | Create an idle task thread in the existing Core Worktree |
-| `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Submit Assignment and recovery prompts from Core |
-| `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Queue diagnostic advice in the launcher Thread |
-| `t3_queue` | `threadId`, `action: "list"`, `limit: 1` | Check for queued turns before resume or archival |
-| `t3_thread_organize` | `threadId`, `action: "unarchive"` or `"archive"` | Reopen or archive a task thread without deleting its history |
-| `t3_thread_update` | `threadId`, `action: "rename"`, `title` | Update the saved thread's title to the current Core stage label |
+| `orchestrator_capabilities` | Current calling thread | Invoking thread and inherited provider/model/options |
+| `t3_project_read` | `projectId` | Project workspace root |
+| `t3_project_list` | `limit: 1` | Authorization check |
+| `t3_thread_read` | `threadId` | Thread identity, Project, Worktree and Run status |
+| `t3_thread_read` | `threadId`, `view: "messages"`, `runLimit: 50`, optional `beforePosition`, `itemId`, `textOffset` | Observe Runs and read assistant replies |
+| `t3_thread_launch` | `projectId`, `title`, `modelSelection`, `workspaceStrategy`, `clientRequestId` | Create an idle task thread |
+| `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Queue Assignment, recovery or diagnostic prompts |
+| `t3_queue` | `threadId`, `action: "list"`, `limit: 1` | Check for queued turns |
+| `t3_thread_organize` | `threadId`, `action: "unarchive"` or `"archive"` | Reopen or archive threads |
+| `t3_thread_update` | `threadId`, `action: "rename"`, `title` | Rename threads |
 
-The plugin uses the [T3 MCP tool contracts](https://github.com/pingdotgg/t3code/blob/main/packages/contracts/src/orchestratorMcp.ts) over Streamable HTTP JSON-RPC. The endpoint defaults to `http://127.0.0.1:3773/mcp`; `terminalPlugins.mcpUrl` overrides it. Each attempt creates an MCP client, negotiates the connection, sends `tools/call`, and closes the transport. The adapter reads `structuredContent` or parses the first text result as JSON.
+- Create with `modelSelection: {instanceId, model, options: [{id, value}]}` and `workspaceStrategy: {type: "existing_worktree", worktreePath: cwd}`.
+- Resume/archive require `activeRunId: null`, an inactive status (`idle`, `completed`, `failed`, `cancelled`, `interrupted`, `rolled_back`) and an empty queue (`items: []`, `nextCursor: null`).
 
-Runner signs in through T3's [external MCP authorization](https://github.com/pingdotgg/t3code/blob/main/docs/user/outside-agents.md) with OAuth authorization code and PKCE. It requests `orchestration:read` and `orchestration:operate`, stores the granted token, scope and expiry privately under `~/.issue-runner-t3`, and checks them before each logical MCP call. The file key is the SHA-256 of the normalized endpoint URL. Runner does not refresh expired credentials.
+## Terminal RPC
 
-`createTab` returns an opaque handle and bound I/O without creating a native thread. The plugin interprets `t3 start --provider <instance-id> --model <model> [--option <id>=<value>]` and `t3 resume {sessionref}` itself. Start maps to `modelSelection: {instanceId, model, options: [{id, value}]}` and `workspaceStrategy: {type: "existing_worktree", worktreePath: cwd}`. The native thread ID becomes Core's `sessionref`; screen reads and key chords are unsupported. Core discovers the bundled Enhancement from the `issue-runner-agent-t3` package root when an Agent uses `agent: t3`. The Enhancement uses the bound Tab I/O to return the exact native thread ID without a readiness probe.
+[Native RPC contract](https://github.com/pingdotgg/t3code/blob/main/packages/contracts/src/rpc.ts): JSON over WebSocket. Requests use `{_tag: "Request", id, tag, payload, headers}`; success is a correlated `Exit` containing `Success`.
 
-The Enhancement polls the owned Thread with `t3_thread_read` every 5s, or sooner when a recovery delay expires. After observation fails, it retries after 10s. It tracks Run ownership across Assignment replacements and adopts the latest in-progress Run. For `completed` or `interrupted`, it uses `beforePosition` to find the last assistant message of the current Assignment's latest Run and `itemId` and `textOffset` to read its complete text.
-
-If the reply starts with `[action required]` after leading whitespace and the expected handoff is absent, the Enhancement requests a pause from Core once per Run and Item. It continues observing the Thread and handoff while paused. Only Runner Enter releases an active pause; native questions and approvals stay in T3. Core invalidates confirmations on Assignment completion or replacement, and the Enhancement clears local pause state on replacement or Tab cleanup.
-
-Resume and archival require `activeRunId: null` and status `idle`, `completed`, `failed`, `cancelled`, `interrupted` or `rolled_back`, unless archival is already complete. Identity and queue checks are preflight checks, not atomic with mutations.
-
-### Missing handoff recovery
-
-The Enhancement considers recovery only when the owned Thread reports `completed` or `interrupted` with no active Run. The expected handoff must be absent and the Assignment must be unpaused. An eligible terminal Run from the preceding Assignment can start a delay for a replacement that has not started a Run. Its reply cannot pause that replacement.
-
-The Enhancement owns recovery eligibility, the delay, and the attempt budget:
-
-- A changed Run or status, observation failure, file-access error, handoff appearance, pause, Assignment replacement, Runner cancellation or Enhancement stop cancels a pending delay.
-- When eligibility returns, including after Runner Enter, the Enhancement waits a full new delay.
-- At expiry, it reads the owned Thread again and rechecks the Assignment, Run, status, handoff absence, pause state and budget before calling Core's `requestRecovery`.
-- At most one request is pending or in flight. A request consumes an attempt even if Core treats it as stale; an in-flight request can settle without interruption.
-
-Core owns recovery wording, serialized input, stale-Assignment rejection and handoff validation. The Adapter queues Core's recovery prompt in the owned task Thread. A manual Run may start between revalidation and delivery; those operations are not atomic.
-
-The Enhancement resets the budget when it observes the handoff or the Assignment changes, not when a new Run starts or the operator presses Enter. Exhaustion produces one notice and stops recovery requests until the budget resets. Monitoring continues without an Operator Pause. A genuine Core rejection disables automatic recovery for the Enhancement instance without replay.
-
-After observation loss, the Enhancement discards stale observations and retries the same Thread every ten seconds. A fresh eligible observation starts a full delay. Reconnection preserves the Assignment, attempts, pause and processed markers. Stop or Runner cancellation ends monitoring; an in-flight Core request can settle without starting another request.
-
-Configure the recovery settings under `terminalPlugins.enhancements` in the Project's `config.yaml`:
-
-| Setting | Default | Valid values |
+| Interface | Parameters used | Purpose |
 | --- | --- | --- |
-| `retryLimit` | `3` | Nonnegative integer; `0` disables automatic recovery but keeps Enhancement Pause active |
-| `handoffRecoveryDelaySeconds` | `120` | Finite nonnegative seconds |
-| `logLevel` | `error` | `error` reports attempts, exhaustion and failures; `info` also reports recovery timer scheduling, cancellation and expiry |
-
-### Skill launcher
-
-| Native interface | Parameters used | Purpose |
-| --- | --- | --- |
-| `orchestrator_capabilities` | Current calling thread | Read the invoking thread ID and inherited provider/model/options |
-| `t3_project_read` | `projectId` | Resolve the T3 Project's workspace root |
-| `t3 thread show` | Current thread ID | Verify that the thread exists on the local Server |
-| `t3 auth session issue` | `terminal:operate`, TTL 5m | Obtain a short-lived terminal credential after operator approval |
-| `POST /api/auth/websocket-ticket/rpc` | Authorized terminal credential | Obtain the ticket for a separate authenticated RPC connection |
-| `terminal.open` | `threadId`, new `terminalId`, `cwd`, `stopOnSettle: false` | Open the Runner terminal in the current conversation |
-| `terminal.write` | `threadId`, `terminalId`, Runner command plus Enter | Start Runner in that terminal |
-
-The [native RPC contract](https://github.com/pingdotgg/t3code/blob/main/packages/contracts/src/rpc.ts) uses JSON messages over WebSocket. Requests contain `{_tag: "Request", id, tag, payload, headers}`; success requires a correlated `Exit` with a `Success` result. The launcher resolves the local Server from its runtime record and keeps its separate terminal credential in memory. Each request waits up to 10s. It verifies the terminal identity, running status and working directory before sending the command once. Closing the socket leaves the terminal running; the client controls panel visibility.
+| `t3 thread show` | Current thread ID | Verify local thread |
+| `t3 auth session issue` | `terminal:operate`, TTL 5m | Terminal session credential |
+| `POST /api/auth/websocket-ticket/rpc` | Bearer credential | WebSocket ticket |
+| `terminal.open` | `threadId`, new `terminalId`, `cwd`, `stopOnSettle: false` | Open Runner terminal |
+| `terminal.write` | `threadId`, `terminalId`, Runner command plus Enter | Start Runner |
 
 ## Interaction sequences
 
 ### Authorize Runner
 
 ```mermaid
-%%{init: {"sequence": {"width": 250, "wrap": true}}}%%
 sequenceDiagram
-    participant P as T3 plugin
-    participant U as Operator browser
-    participant N as Native T3
-    Note over P: auth login resolves the MCP endpoint and creates a loopback callback with PKCE
-    P->>N: POST /oauth/mcp/register
-    N-->>P: OAuth client ID
-    P->>U: Open authorization URL
-    U->>N: Approve application access
-    N-->>U: Redirect to loopback callback
-    U->>P: Authorization code, state, issuer
-    Note over P: Validate state and issuer
-    P->>N: POST /oauth/mcp/token
-    N-->>P: Access token, granted scope, expiry
-    Note over P: Require operation scope and store credential privately
-    P->>N: auth status: t3_project_list with limit 1
-    N-->>P: projects
-    Note over P: Missing, expired, insufficient or rejected access fails with a diagnostic
+    participant R as Runner
+    participant U as Browser
+    participant T as Native T3
+    R->>T: POST /oauth/mcp/register
+    T-->>R: Client ID
+    R->>U: Authorization URL (PKCE)
+    U->>T: Approve access
+    T-->>U: Loopback redirect
+    U->>R: Code, state, issuer
+    R->>T: POST /oauth/mcp/token
+    T-->>R: Access token, scope, expiry
+    R->>T: t3_project_list (limit 1)
+    T-->>R: Projects
 ```
 
 ### Launch Runner from the companion Skill
 
 ```mermaid
-%%{init: {"sequence": {"width": 250, "wrap": true}}}%%
 sequenceDiagram
     participant S as Companion Skill
-    participant N as Native T3
-    participant P as Runner CLI
-    S->>N: orchestrator_capabilities
-    N-->>S: Current thread ID and inherited selection
-    S->>N: t3_thread_read, t3_project_read
-    N-->>S: Project identity and workspace root
-    Note over S: Prepare config and Run selector, show command and links, obtain operator approval
-    S->>N: t3 thread show (current thread)
-    N-->>S: Thread exists on local Server
-    S->>N: Request short-lived terminal session and WebSocket ticket
-    N-->>S: Authorized RPC connection
-    S->>N: terminal.open (threadId, new terminalId, launchDirectory)
-    N-->>S: Terminal snapshot
-    Note over S: Validate identity, cwd and running status
-    S->>N: terminal.write (Runner command plus Enter)
-    N->>P: Start Runner with T3CODE_THREAD_ID
-    N-->>S: Write acknowledgement
-    Note over S: Close RPC socket and end the turn
-    Note over N,P: Terminal and Runner continue independently of the Skill
+    participant T as Native T3
+    S->>T: orchestrator_capabilities
+    T-->>S: Thread ID, provider/model/options
+    S->>T: t3_thread_read, t3_project_read
+    T-->>S: Project and workspace root
+    S->>T: t3 thread show
+    S->>T: t3 auth session issue
+    T-->>S: Terminal credential
+    S->>T: POST /api/auth/websocket-ticket/rpc
+    T-->>S: WebSocket ticket
+    S->>T: terminal.open
+    T-->>S: Terminal snapshot
+    S->>T: terminal.write (command plus Enter)
+    T-->>S: Acknowledgement
+    Note over S,T: Disconnect leaves Runner running
 ```
 
-### Initialize and create a task thread
+### Create a task thread and submit an Assignment
 
 ```mermaid
-%%{init: {"sequence": {"width": 250, "wrap": true}}}%%
 sequenceDiagram
-    participant C as Core
     participant P as T3 plugin
-    participant N as Native T3
-    Note over P: Require T3CODE_THREAD_ID and check MCP authorization before invoking Core
-    C->>P: Create terminal plugin
-    P->>N: t3_thread_read (launcher threadId)
-    N-->>P: thread with projectId
-    Note over P: Validate launcher identity, capture Project ID
-    C->>P: createTab(cwd, label, env, submitKey, signal)
-    Note over P: Require absolute cwd, empty env overlay and Enter
-    P->>N: t3_project_list (limit 1)
-    N-->>P: projects
-    P-->>C: Owned handle and bound I/O
-    Note over P: No native thread or command yet
-    C->>P: execute(handle, t3 start ...)
-    P->>N: t3_thread_launch (projectId, title, modelSelection, existing_worktree, clientRequestId)
-    Note over N: Bind to Core's exact Worktree, omit initial message
-    N-->>P: threadId, projectId, runId null
-    Note over P: Require matching Project and a new ID distinct from the launcher, bind handle
-    P-->>C: Native sessionref
-    Note over C: Validate and checkpoint native reference, skip Session Probe
+    participant T as Native T3
+    P->>T: t3_thread_read (launcher threadId)
+    T-->>P: Project ID
+    P->>T: t3_project_list (limit 1)
+    T-->>P: Projects
+    P->>T: t3_thread_launch (existing_worktree, no message)
+    T-->>P: threadId, projectId, runId null
+    P->>T: t3_thread_send (threadId, mode queue)
+    T-->>P: threadId, messageId, runId
+    Note over P,T: Delivery acknowledgement, not task completion
 ```
 
-### Submit a task and verify completion
+### Observe a task thread
 
 ```mermaid
-%%{init: {"sequence": {"width": 250, "wrap": true}}}%%
 sequenceDiagram
-    participant C as Core
-    participant P as T3 plugin
-    participant N as Native T3
-    Note over C: Print stage, thread ID and expected handoff path
-    C->>P: Bound io.submitText(complete Assignment)
-    Note over P: Require owned bound thread and non-aborted signal
-    P->>N: t3_thread_send (threadId, message, mode: queue, clientRequestId)
-    N-->>P: threadId, messageId, runId
-    Note over P: Require matching thread ID and nonempty message and run IDs
-    P-->>C: Delivery acknowledged
-    Note over C,N: An acknowledgement is not task completion
-    N->>N: Agent works in the assigned Worktree
-    Note over N,C: Agent writes handoff on the shared filesystem, not through MCP
-    C->>C: Observe and verify handoff, persist accepted stage
-    C->>P: closeTab(owned handle)
-```
-
-### Resume an exact native thread
-
-```mermaid
-%%{init: {"sequence": {"width": 250, "wrap": true}}}%%
-sequenceDiagram
-    participant C as Core
-    participant P as T3 plugin
-    participant N as Native T3
-    C->>P: execute(handle, t3 resume saved sessionref)
-    P->>N: t3_thread_read (saved threadId)
-    N-->>P: Thread identity, Worktree, active run and status
-    Note over P: Require exact Project and resolved Worktree, inactive run
-    P->>N: t3_queue (list, limit 1)
-    N-->>P: Empty queue, nextCursor null
-    P->>N: t3_thread_read (same threadId)
-    N-->>P: Revalidated thread, archived, title
-    opt Archived
-        P->>N: t3_thread_organize (unarchive)
-        N-->>P: Sequence acknowledgement
-    end
-    opt Title differs from Core stage label
-        P->>N: t3_thread_update (rename, label)
-        N-->>P: Sequence and matching title
-    end
-    P-->>C: Exact saved sessionref
-    Note over P,N: Failed preflight prevents mutation, failed unarchive or rename prevents dispatch
-    Note over C: Continue the saved conversation, never replace it with a new thread
-```
-
-### Archive an owned task thread or confirm absence
-
-```mermaid
-%%{init: {"sequence": {"width": 250, "wrap": true}}}%%
-sequenceDiagram
-    participant P as T3 plugin
-    participant N as Native T3
-    Note over P: closeTab accepts only an owned handle
-    alt Handle has no bound thread
-        Note over P: Retire handle locally
-    else Handle has a bound thread
-        P->>N: t3_thread_read (owned threadId)
-        alt Already archived or thread_not_found
-            N-->>P: Archived state or not-found rejection
-            Note over P: Retire handle without mutation
-        else Present and not archived
-            N-->>P: Thread state
-            Note over P: Validate identity and Project, require inactive run
-            P->>N: t3_queue (list, limit 1)
-            N-->>P: Empty queue, nextCursor null
-            P->>N: t3_thread_read (same threadId)
-            N-->>P: Revalidated thread state
-            alt Still present, inactive and unarchived
-                P->>N: t3_thread_organize (archive)
-                N-->>P: Sequence acknowledgement
-                Note over P: Retire handle, preserve native history
-            else Already archived or confirmed absent
-                Note over P: Retire handle without mutation
+    participant E as Enhancement
+    participant T as Native T3
+    loop Poll every 5s
+        E->>T: t3_thread_read (view messages, runLimit 50)
+        T-->>E: Thread, recentRuns, items, earlierPosition
+        opt Inactive completed/interrupted Run
+            loop Until latest assistant reply found
+                E->>T: t3_thread_read (beforePosition)
+                T-->>E: Earlier items
+            end
+            loop While reply text is truncated
+                E->>T: t3_thread_read (itemId, textOffset)
+                T-->>E: Text chunk, nextTextOffset
             end
         end
     end
-    Note over P,N: A not-found result during preflight confirms absence. Busy, unknown or failed closure retains ownership
+    Note over E,T: Retry failed observations after 10s
 ```
 
-### Settle requests and handle lost replies
+### Resume a native thread
 
 ```mermaid
-%%{init: {"sequence": {"width": 250, "wrap": true}}}%%
 sequenceDiagram
     participant P as T3 plugin
-    participant N as Native T3
-    Note over P: Load credential once per logical call, generate one clientRequestId for launch or send
-    loop While unsettled, one attempt normally or up to three for launch/send
-        P->>N: MCP connect and tools/call (same endpoint, token, arguments and request ID)
-        alt Valid acknowledgement
-            N-->>P: Correlated tool result
-            Note over P: Resolve request
-        else Definitive rejection
-            N-->>P: Non-408 HTTP 4xx, definitive JSON-RPC or ordinary tool error
-            Note over P: Reject without retry, preserve uncertainty from earlier attempts
-        else Timeout, disconnect, malformed receipt or orchestration_error on launch/send
-            N--xP: No confirmed successful result
-            Note over P: Close transport, retry only launch/send after 5s if budget and signal permit
+    participant T as Native T3
+    P->>T: t3_thread_read (saved threadId)
+    T-->>P: Project, Worktree, Run status
+    Note over P: Require exact identity and inactive Run
+    P->>T: t3_queue (list, limit 1)
+    T-->>P: Empty queue
+    P->>T: t3_thread_read (same threadId)
+    T-->>P: Revalidated thread
+    opt Archived
+        P->>T: t3_thread_organize (unarchive)
+        T-->>P: Acknowledgement
+    end
+    opt Title differs
+        P->>T: t3_thread_update (rename)
+        T-->>P: Acknowledgement
+    end
+```
+
+### Archive a task thread
+
+```mermaid
+sequenceDiagram
+    participant P as T3 plugin
+    participant T as Native T3
+    P->>T: t3_thread_read (owned threadId)
+    alt Already archived or thread_not_found
+        T-->>P: Archived state or not found
+    else Present and unarchived
+        T-->>P: Thread state
+        Note over P: Require inactive Run
+        P->>T: t3_queue (list, limit 1)
+        T-->>P: Empty queue
+        P->>T: t3_thread_read (same threadId)
+        T-->>P: Revalidated thread
+        opt Still present and unarchived
+            P->>T: t3_thread_organize (archive)
+            T-->>P: Acknowledgement
         end
     end
-    Note over P: Each attempt has a 10s deadline, cancellation stops retries
-    Note over P,N: Exhausted attempts can leave an idle thread or delivered prompt. Signing in again changes T3's deduplication scope. Core owns Operator Pause and recovery
+```
+
+### Retry uncertain create/send requests
+
+```mermaid
+sequenceDiagram
+    participant P as T3 plugin
+    participant T as Native T3
+    loop Up to three attempts, 10s deadline each
+        P->>T: tools/call (same token and clientRequestId)
+        alt Acknowledged
+            T-->>P: Tool result
+            Note over P: Stop retries
+        else Definitive rejection
+            T-->>P: Error
+            Note over P: Stop retries
+        else Uncertain outcome
+            T--xP: Timeout, disconnect, malformed receipt or orchestration_error
+            Note over P: Wait 5s before retry
+        end
+    end
 ```
