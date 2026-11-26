@@ -22,15 +22,15 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 ## `$issue-runner-t3 setup`
 
 1. Read the [Issue Runner T3 prerequisites](https://github.com/BuddyLabsCo/issue-runner-t3/blob/main/README.md#prerequisites). Check each prerequisite using `mcpUrl` where applicable, without changing anything; report gaps and unverified permissions.
-2. Obtain approval for repairs and sign-ins. Install missing Runner with `npm install -g issue-runner-agent-t3` or use `upgrade` for legacy migration.
+2. Obtain approval for repairs and sign-ins. Use the host's installation mechanism and guide the operator through required approvals.
 3. Recheck and report remaining blockers. Offer `init` when setup is ready.
 
 ## `$issue-runner-t3 upgrade`
 
-1. Check latest `issue-runner-agent-t3`, both global packages, CLI links, and whether the invoked Skill matches the installed latest bundle (if available). Stop on check failure or no changes needed.
-2. Show version and actions; require approval and confirmation all Runner processes have stopped. Do not inspect or terminate processes.
-3. Uninstall legacy `issue-runner-t3` globally first if present. Globally install the exact approved version if missing, outdated, CLI links broken, or legacy removed. Mirror its full bundle into the invoked Skill only.
-4. Stop on failure; report completed/failed actions and recheck on rerun. No rollback, extra CLI verification, or changes to other Skills, Projects or credentials.
+1. Check latest `issue-runner-agent-t3`, both global packages, CLI links and invoked Skill against the installed latest bundle if available. Stop on error or no changes.
+2. Show version/actions; require approval and confirmation all Runner processes stopped. No process inspection or termination.
+3. Uninstall global legacy `issue-runner-t3` if present; install the approved exact replacement if needed (including broken CLI links or legacy removal). Mirror the full bundle into the invoked Skill only.
+4. Stop on failure, report completed/failed actions, recheck on rerun. No rollback or CLI verification. Preserve Projects and credentials.
 
 ## `$issue-runner-t3 init`
 
