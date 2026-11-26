@@ -2,6 +2,8 @@
 
 ## 0.1.3
 
+- docs: [issue-78] remove legacy npm package note from prerequisites (#79)
+- chore: propose release v0.1.3 (#73)
 - feat: [issue-70] upgrade Runner package and repair invoked Skill (#77)
 - fix: [issue-68] resume handoff monitoring after observation loss (#76)
 - feat: [issue-67] recover missing Assignment handoffs (#75)
