@@ -22,16 +22,15 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 ## `$issue-runner-t3 setup`
 
 1. Read the [Issue Runner T3 prerequisites](https://github.com/BuddyLabsCo/issue-runner-t3/blob/main/README.md#prerequisites). Check each prerequisite using `mcpUrl` where applicable, without changing anything; report gaps and unverified permissions.
-2. Obtain approval for repairs and sign-ins. Use `upgrade` for legacy migration or `npm install --global issue-runner-agent-t3` for a missing Runner. Use the host’s installation mechanism for other repairs.
+2. Obtain approval for repairs and sign-ins. Install missing Runner with `npm install -g issue-runner-agent-t3` or use `upgrade` for legacy migration.
 3. Recheck and report remaining blockers. Offer `init` when setup is ready.
 
 ## `$issue-runner-t3 upgrade`
 
-1. Read `npm view issue-runner-agent-t3@latest version`. Check both package versions under `npm root --global` and CLI links/shims under `npm prefix --global`. If the replacement is current, compare the invoked Skill with its complete bundle (`skills/issue-runner-t3/`). Stop on check failure or if no update is needed.
-2. Show the latest version and planned actions. Before writing, require approval and confirmation that all Runner processes have stopped; do not inspect or terminate them.
-3. Uninstall the legacy package if present (`npm uninstall --global issue-runner-t3`). Run `npm install --global issue-runner-agent-t3@<version> --bin-links=true` only if missing, outdated, CLI links are missing, or the legacy package was removed.
-4. Mirror the full installed bundle into the invoked Skill only, without following symlinks. Preserve other Skills, Project files and credentials.
-5. Stop on failure and report completed and failed actions. Restart at step 1 on rerun. No rollback or extra CLI verification.
+1. Check `npm view issue-runner-agent-t3@latest version`, both global packages (`npm root -g`), CLI links/shims (`npm prefix -g`), and the invoked Skill against the installed latest bundle if available. Stop without writes on failure or if no action is needed.
+2. Show target version and actions. Require approval and confirmation that all Runner processes have stopped; do not inspect or terminate them.
+3. Run `npm uninstall -g issue-runner-t3` if installed, then `npm install -g issue-runner-agent-t3@<version> --bin-links=true` if missing, outdated, CLI links are missing, or legacy was removed. Mirror the full installed `skills/issue-runner-t3/` bundle into the invoked Skill only, without following symlinks.
+4. Stop on first failure, report completed/failed actions, and recheck on rerun. No rollback, extra CLI verification, or changes to other Skills, Project files or credentials.
 
 ## `$issue-runner-t3 init`
 
