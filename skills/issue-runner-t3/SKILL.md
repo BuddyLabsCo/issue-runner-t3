@@ -29,23 +29,11 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 
 ## `$issue-runner-t3 upgrade`
 
-1. Locate the invoked Skill's [upgrade helper](scripts/upgrade.mjs). Run the read-only check using its absolute, shell-quoted path:
-
-   ```text
-   node <skill-directory>/scripts/upgrade.mjs check
-   ```
-
-2. On failure, report the error and stop. If `actions` is empty, report that no upgrade is needed and stop. Otherwise show the selected `latest` version and every proposed action.
-3. Obtain explicit approval for those actions and confirmation that all Runner processes have stopped. If either is missing, stop without writes. Do not inspect or terminate processes.
-4. Only after both confirmations, run the same helper with the `confirmationId` from the check:
-
-   ```text
-   node <skill-directory>/scripts/upgrade.mjs apply <confirmationId> --approved --runner-stopped
-   ```
-
-5. Report the completed and failed actions. On failure, stop and offer to rerun `upgrade` from the check; do not roll back. On success, report completion without another CLI verification.
-
-The helper uses the current npm installation and removes the legacy package first. It installs the exact selected version if needed, including reinstalls to restore CLI links after legacy removal or when links are missing. It synchronizes the full bundled Skill into this invoked Skill directory only. It does not change other Skills, Project files, or credentials.
+1. Read the latest version with `npm view issue-runner-agent-t3@latest version`. Use `npm root --global` to locate both global packages (`issue-runner-agent-t3` and legacy `issue-runner-t3`) and read their installed versions. Check the shared CLI link or Windows shims under `npm prefix --global`. If the replacement is current, compare the invoked Skill directory recursively with its bundled `skills/issue-runner-t3/`, including helpers. Stop without changes if any check fails or everything is current.
+2. Show the selected version and proposed actions. Obtain both upgrade approval and confirmation that all Runner processes have stopped. Do not inspect or terminate processes. Stop without changes if either confirmation is missing.
+3. If present, uninstall the legacy package with `npm uninstall --global issue-runner-t3`. Then install the confirmed exact version with `npm install --global issue-runner-agent-t3@<version> --bin-links=true` if the replacement is missing, outdated, missing CLI links, or the legacy package was removed. Legacy removal can remove the shared CLI link even when the replacement is current.
+4. Synchronize the complete installed bundle into the invoked Skill directory only, including adding, replacing and removing files to match the bundle. Do not reinstall a current package for Skill-only repair. Preserve other Skills, Project files and credentials.
+5. Stop at the first failure and report completed and failed actions. Rerun from step 1; do not roll back. Report success directly without an additional CLI verification.
 
 ## `$issue-runner-t3 init`
 

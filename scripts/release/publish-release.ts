@@ -232,7 +232,6 @@ function validateReadiness(
     "prompts/runner-pause-guidance.md",
     "skills/issue-runner-t3/SKILL.md",
     "skills/issue-runner-t3/scripts/launch-terminal.mjs",
-    "skills/issue-runner-t3/scripts/upgrade.mjs",
   ]) {
     if (!artifact.files.includes(file))
       problems.push(`the tarball must contain ${file}`);

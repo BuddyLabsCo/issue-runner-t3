@@ -495,7 +495,6 @@ for (const missing of [
   "prompts/runner-pause-guidance.md",
   "skills/issue-runner-t3/SKILL.md",
   "skills/issue-runner-t3/scripts/launch-terminal.mjs",
-  "skills/issue-runner-t3/scripts/upgrade.mjs",
 ]) {
   await posixTest(`a candidate missing ${missing} cannot publish`, (t) => {
     const files: Record<string, string> = { ...readyPackage.files };
