@@ -1,13 +1,15 @@
 ---
 name: issue-runner-t3
-description: Manage Issue Runner for the current T3 Code conversation. Use for $issue-runner-t3 setup (host checks and authorization), init (Project configuration and prompts), run (Issue selection and terminal launch), or cleanup (remove Project files except configuration and prompts).
+description: Manage Issue Runner for the current T3 Code conversation. Use for $issue-runner-t3 setup (host checks and authorization), init (Project configuration and prompts), run (Issue selection and terminal launch), upgrade (global npm package and this Skill), or cleanup (remove Project files except configuration and prompts).
 ---
 
 # Issue Runner for T3 Code
 
-Prepare the Runner host, initialize a Project, launch Runner, and clean up Project files from the current T3 conversation.
+Prepare the Runner host, initialize a Project, launch Runner, upgrade its installation, and clean up Project files from the current T3 conversation.
 
 ## Prepare project parameters
+
+Skip this section for `upgrade`.
 
 - `checkout`: absolute T3 project root, not the current Worktree. Resolve via `orchestrator_capabilities` (`parentThreadId`) → `t3_thread_read` (`thread.projectId`) → `t3_project_read` (`workspaceRoot`) and verify it is a Git checkout.
 - `repository`: GitHub `owner/repo` from `git remote get-url origin` in `checkout`; strip `.git` and redact credentials.
@@ -22,8 +24,28 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 ## `$issue-runner-t3 setup`
 
 1. Read the [Issue Runner T3 prerequisites](https://github.com/BuddyLabsCo/issue-runner-t3/blob/main/README.md#prerequisites). Check each prerequisite using `mcpUrl` where applicable, without changing anything; report gaps and unverified permissions.
-2. Obtain approval for repairs and sign-ins. Use the host's installation mechanism and guide the operator through required approvals.
+2. Obtain approval for repairs and sign-ins. If the legacy npm package is installed, use `upgrade`. Otherwise, install Runner with `npm install --global issue-runner-agent-t3` if missing. Guide the operator through required approvals.
 3. Recheck and report remaining blockers. Offer `init` when setup is ready.
+
+## `$issue-runner-t3 upgrade`
+
+1. Locate the invoked Skill's [upgrade helper](scripts/upgrade.mjs). Run the read-only check using its absolute, shell-quoted path:
+
+   ```text
+   node <skill-directory>/scripts/upgrade.mjs check
+   ```
+
+2. On failure, report the error and stop. If `actions` is empty, report that no upgrade is needed and stop. Otherwise show the selected `latest` version and every proposed action.
+3. Obtain explicit approval for those actions and confirmation that all Runner processes have stopped. If either is missing, stop without writes. Do not inspect or terminate processes.
+4. Only after both confirmations, run the same helper with the `confirmationId` from the check:
+
+   ```text
+   node <skill-directory>/scripts/upgrade.mjs apply <confirmationId> --approved --runner-stopped
+   ```
+
+5. Report the completed and failed actions. On failure, stop and offer to rerun `upgrade` from the check; do not roll back. On success, report completion without another CLI verification.
+
+The helper uses the current npm installation, removes the legacy global package before installing the exact selected version if needed, and synchronizes the full bundled Skill into this invoked Skill directory only. It does not change other Skills, Project files, or credentials.
 
 ## `$issue-runner-t3 init`
 
