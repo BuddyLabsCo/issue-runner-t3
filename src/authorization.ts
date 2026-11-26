@@ -62,7 +62,7 @@ export async function callMcp(
         throw new Error(
           `${error.message} Retry budget exhausted after 3 attempts. ${retry.uncertainEffect}`,
         );
-      await sleep(5000, undefined, { signal: retry.signal });
+      await sleep(5000, undefined, { signal });
     }
   }
 }

@@ -15,7 +15,7 @@ import { substitute } from "./fixtures/mcp-substitute.mjs";
 const realTimeout = setTimeout;
 const delay = (ms) => new Promise((resolve) => realTimeout(resolve, ms));
 async function until(predicate) {
-  for (let i = 0; i < 1200; i++) {
+  for (let i = 0; i < 2000; i++) {
     if (predicate()) return;
     await delay(10);
   }
@@ -36,27 +36,33 @@ function reply(runId, itemId, position, text, extra = {}) {
   };
 }
 
-async function fixture(t) {
-  const home = await mkdtemp(join(tmpdir(), "enhancement-pause-"));
-  const oldHome = process.env.HOME;
-  const oldProfile = process.env.USERPROFILE;
-  process.env.HOME = process.env.USERPROFILE = home;
-  t.after(async () => {
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
-    if (oldProfile === undefined) delete process.env.USERPROFILE;
-    else process.env.USERPROFILE = oldProfile;
-    await rm(home, { recursive: true, force: true });
-  });
+async function taskThread(home) {
   let status = "idle";
   let runs = [];
   let items = [];
   let chunks = new Map();
-  let observations = 0;
+  let pending;
+  let nextContinuation;
+  let unavailable = false;
   const seen = [];
-  const server = await substitute((name, args, authorization) => {
+  const server = await substitute(async (name, args, authorization) => {
     assert.equal(authorization, `Bearer ${server.token}`);
     if (name === "t3_thread_read") {
+      if (args.threadId === "task") seen.push(args);
+      if (args.view === "messages") {
+        if (!args.itemId && args.beforePosition === undefined) {
+          pending = Promise.withResolvers();
+          await pending.promise;
+          if (unavailable) {
+            unavailable = false;
+            return { code: "orchestration_error", message: "Unavailable" };
+          }
+        } else if (nextContinuation) {
+          const update = nextContinuation;
+          nextContinuation = undefined;
+          update();
+        }
+      }
       const thread = {
         threadId: args.threadId,
         projectId: "project",
@@ -69,11 +75,9 @@ async function fixture(t) {
       };
       if (args.threadId === "launcher") return { thread };
       assert.equal(args.threadId, "task");
-      seen.push(args);
       let page;
       if (args.itemId) page = [chunks.get(args.itemId)];
       else {
-        if (args.beforePosition === undefined) observations++;
         page = items
           .filter((item) => item.position < (args.beforePosition ?? Infinity))
           .slice(-1);
@@ -101,7 +105,54 @@ async function fixture(t) {
     if (name === "t3_thread_organize") return { sequence: 1 };
     assert.fail(`Unexpected tool ${name}`);
   });
-  t.after(() => server.close(true));
+  return {
+    server,
+    release: () => pending?.resolve(),
+    seen,
+    onContinuation(update) {
+      nextContinuation = update;
+    },
+    failNext() {
+      unavailable = true;
+    },
+    set(nextStatus, runIds, messages, nextChunks = new Map()) {
+      status = nextStatus;
+      runs = runIds.map((runId, i) => ({
+        runId,
+        ordinal: runIds.length - i,
+        status: i === 0 ? status : "completed",
+      }));
+      items = messages;
+      chunks = nextChunks;
+    },
+    async poll() {
+      await until(() => pending !== undefined);
+      const observation = pending;
+      observation.resolve();
+      // The next request cannot start until all pages and handoff checks settle.
+      // Hold its response until the next poll so assertions see a stable result.
+      await until(() => pending !== observation);
+    },
+  };
+}
+
+async function fixture(t) {
+  const home = await mkdtemp(join(tmpdir(), "enhancement-pause-"));
+  const oldHome = process.env.HOME;
+  const oldProfile = process.env.USERPROFILE;
+  process.env.HOME = process.env.USERPROFILE = home;
+  t.after(async () => {
+    if (oldHome === undefined) delete process.env.HOME;
+    else process.env.HOME = oldHome;
+    if (oldProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = oldProfile;
+    await rm(home, { recursive: true, force: true });
+  });
+  const { server, release, ...thread } = await taskThread(home);
+  t.after(async () => {
+    release();
+    await server.close(true);
+  });
   await saveCredential(server.endpoint, {
     accessToken: server.token,
     expiresAt: Date.now() + 120_000,
@@ -109,7 +160,10 @@ async function fixture(t) {
   });
   const input = new PassThrough();
   const output = new PassThrough();
-  output.resume();
+  let rendered = "";
+  output.on("data", (chunk) => {
+    rendered += chunk;
+  });
   const controller = new AbortController();
   const operator = new TerminalOperator(controller.signal, { input, output });
   const confirmations = new TerminalConfirmations(operator, controller.signal);
@@ -139,25 +193,10 @@ async function fixture(t) {
     () => assert.fail("Unexpected terminal wait"),
   );
   return {
+    ...thread,
     input,
     confirmations,
-    seen,
-    set(nextStatus, runIds, messages, nextChunks = new Map()) {
-      status = nextStatus;
-      runs = runIds.map((runId, i) => ({
-        runId,
-        ordinal: runIds.length - i,
-        status: i === 0 ? status : "completed",
-      }));
-      items = messages;
-      chunks = nextChunks;
-    },
-    async poll() {
-      const before = observations;
-      await until(() => observations > before);
-      // Let the authenticated reads, page continuations and handoff check settle.
-      await delay(100);
-    },
+    rendered: () => rendered,
     async assign(name) {
       const expectedFile = join(home, `${name}.json`);
       await conversations.submit(tab, name, {
@@ -168,7 +207,10 @@ async function fixture(t) {
     },
     manual: () => conversations.submit(tab, "manual follow-up"),
     complete: () => conversations.complete(tab),
-    stop: () => conversations.stop(tab),
+    async stop() {
+      await conversations.stop(tab);
+      release();
+    },
   };
 }
 
@@ -210,7 +252,7 @@ test("only the latest attributable reply pauses; Enter resumes and processed mar
   assert.deepEqual(f.confirmations.status.active, confirmation);
   assert.deepEqual(f.confirmations.status.pending, []);
   f.input.write("invalid\n");
-  await delay(30);
+  await until(() => f.rendered().includes("Unsupported input."));
   assert.deepEqual(f.confirmations.status.active, confirmation);
   f.input.write("\n");
   await until(() => !f.confirmations.status.active);
@@ -264,11 +306,80 @@ test("replacement isolates old Runs, adopts active Runs, and completion invalida
   await until(() => !f.confirmations.status.active);
   await f.poll();
   assert.equal(f.confirmations.status.active, undefined);
-  await f.assign("fourth");
+  const existingHandoff = await f.assign("fourth");
+  await f.poll();
+  assert.equal(f.confirmations.status.active, undefined);
+  await writeFile(existingHandoff, "{}");
+  f.set(
+    "completed",
+    ["fresh", "late"],
+    [reply("fresh", "marker", 3, "[action required] already handed off")],
+  );
   await f.poll();
   assert.equal(f.confirmations.status.active, undefined);
   await f.stop();
   const reads = f.seen.length;
   await delay(5200);
   assert.equal(f.seen.length, reads);
+});
+
+test("a Run first observed on a continuation page belongs to the old Assignment", async (t) => {
+  const f = await fixture(t);
+  await f.assign("first");
+  f.set(
+    "completed",
+    ["old"],
+    [
+      reply("old", "split", 0, "[action", {
+        textTruncated: true,
+        nextTextOffset: 7,
+      }),
+    ],
+  );
+  const late = reply("late", "marker", 1, "[action required] old Assignment");
+  f.onContinuation(() =>
+    f.set(
+      "completed",
+      ["late", "old"],
+      [late],
+      new Map([["split", reply("old", "split", 0, " required]")]]),
+    ),
+  );
+  await f.poll();
+  assert.ok(f.seen.some((args) => args.itemId === "split"));
+  assert.equal(f.confirmations.status.active, undefined);
+  await f.assign("replacement");
+  await f.poll();
+  assert.equal(f.confirmations.status.active, undefined);
+  f.set(
+    "completed",
+    ["fresh", "late"],
+    [reply("fresh", "marker", 2, "[action required] new Assignment")],
+  );
+  await f.poll();
+  assert.ok(f.confirmations.status.active);
+});
+
+test("observation loss prevents adopting a stale active Run on replacement", async (t) => {
+  const f = await fixture(t);
+  await f.assign("first");
+  f.set("running", ["old"], []);
+  await f.poll();
+  f.failNext();
+  await f.poll();
+  await f.assign("replacement");
+  f.set(
+    "completed",
+    ["old"],
+    [reply("old", "marker", 0, "[action required] old Assignment")],
+  );
+  await f.poll();
+  assert.equal(f.confirmations.status.active, undefined);
+  f.set(
+    "completed",
+    ["fresh", "old"],
+    [reply("fresh", "marker", 1, "[action required] new Assignment")],
+  );
+  await f.poll();
+  assert.ok(f.confirmations.status.active);
 });

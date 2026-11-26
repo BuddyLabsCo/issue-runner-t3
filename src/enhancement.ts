@@ -73,34 +73,47 @@ class T3Enhancement implements Enhancement {
   }
 
   private async read(args: RecordData = {}) {
-    if (!this.current()) throw new Error("T3 observation stopped.");
-    const threadId = this.tab.threadId;
-    const result = await callMcp(
-      this.tab.endpoint,
-      "t3_thread_read",
-      {
-        threadId,
-        view: "messages",
-        runLimit: 50,
-        ...args,
-      },
-      undefined,
-      this.signal,
-    );
-    const thread = record(result.thread);
-    if (
-      !this.current() ||
-      thread.threadId !== threadId ||
-      !Array.isArray(result.recentRuns) ||
-      !Array.isArray(result.items)
-    )
-      throw new Error("Invalid T3 observation.");
-    return {
-      thread,
-      runs: result.recentRuns.map(record),
-      items: result.items.map(record),
-      earlierPosition: result.earlierPosition,
-    };
+    try {
+      if (!this.current()) throw new Error("T3 observation stopped.");
+      const threadId = this.tab.threadId;
+      const result = await callMcp(
+        this.tab.endpoint,
+        "t3_thread_read",
+        {
+          threadId,
+          view: "messages",
+          runLimit: 50,
+          ...args,
+        },
+        undefined,
+        this.signal,
+      );
+      const thread = record(result.thread);
+      if (
+        !this.current() ||
+        thread.threadId !== threadId ||
+        !Array.isArray(result.recentRuns) ||
+        !Array.isArray(result.items)
+      )
+        throw new Error("Invalid T3 observation.");
+      const items = result.items.map(record);
+      const runIds = result.recentRuns.map((run) => {
+        const { runId } = record(run);
+        if (typeof runId !== "string") throw new Error("Invalid T3 Run.");
+        return runId;
+      });
+      // A continuation page may expose new Runs even when reply extraction fails.
+      for (const runId of runIds) {
+        if (!this.runAssignments.has(runId))
+          this.runAssignments.set(runId, this.assignment?.id);
+      }
+      this.activeRun =
+        typeof thread.activeRunId === "string" ? thread.activeRunId : undefined;
+      return { thread, items, earlierPosition: result.earlierPosition };
+    } catch (error) {
+      this.activeRun = undefined;
+      throw error;
+    }
   }
 
   private async lastReply(
@@ -177,14 +190,7 @@ class T3Enhancement implements Enhancement {
 
   private async observe() {
     const page = await this.read();
-    const { thread, runs } = page;
-    for (const run of runs) {
-      if (typeof run.runId !== "string") throw new Error("Invalid T3 Run.");
-      if (!this.runAssignments.has(run.runId))
-        this.runAssignments.set(run.runId, this.assignment?.id);
-    }
-    this.activeRun =
-      typeof thread.activeRunId === "string" ? thread.activeRunId : undefined;
+    const { thread } = page;
     const candidate = this.assignment;
     if (!candidate) return;
     const path = resolve(this.context.cwd, candidate.expectedFile);
