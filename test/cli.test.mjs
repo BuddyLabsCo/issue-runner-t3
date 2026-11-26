@@ -16,7 +16,7 @@ import {
   rename,
   symlink,
 } from "node:fs/promises";
-import { delimiter, join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
@@ -403,9 +403,10 @@ const approve = async (url) => {
   assert.equal(response.status, 200);
 };
 
-test("packed Enhancement binds fresh and resumed Tabs independently", async () => {
-  const sent = new Map();
+test("packed Enhancement binds fresh and resumed Tabs and retains only their validated receipts", async () => {
+  const sent = [];
   const reads = [];
+  const archived = [];
   const server = await substitute((name, args) => {
     if (name === "t3_thread_read") {
       reads.push(args.threadId);
@@ -425,12 +426,38 @@ test("packed Enhancement binds fresh and resumed Tabs independently", async () =
     if (name === "t3_thread_launch")
       return { threadId: "fresh-thread", projectId: "project", runId: null };
     if (name === "t3_thread_send") {
-      sent.set(args.threadId, args.message);
+      sent.push(args);
+      const attempts = sent.filter(({ message }) => message === args.message);
+      if (args.message === "retry" && attempts.length === 1)
+        return {
+          threadId: "saved-thread",
+          runId: "wrong-run",
+          messageId: "wrong-message",
+        };
+      if (args.message === "rejected") {
+        return [
+          {
+            threadId: "fresh-thread",
+            runId: "wrong-run",
+            messageId: "wrong-message",
+          },
+          { threadId: "saved-thread", runId: " ", messageId: "wrong-message" },
+          { threadId: "saved-thread", runId: "wrong-run", messageId: " " },
+        ][attempts.length - 1];
+      }
+      const prefix = args.threadId === "fresh-thread" ? "fresh" : "saved";
+      const sequence = args.message === "retry" ? 2 : 1;
       return {
         threadId: args.threadId,
-        runId: randomUUID(),
-        messageId: randomUUID(),
+        runId: `${prefix}-run-${sequence}`,
+        messageId: `${prefix}-message-${sequence}`,
+        status: "queued",
+        delivery: "queued",
       };
+    }
+    if (name === "t3_thread_organize") {
+      archived.push(args);
+      return { sequence: 1 };
     }
     assert.fail(`Unexpected T3 tool ${name}`);
   });
@@ -449,16 +476,36 @@ test("packed Enhancement binds fresh and resumed Tabs independently", async () =
       new URL("./fixtures/enhancement-check.mjs", import.meta.url),
       entry,
     );
-    const result = await cli([server.endpoint], { entry });
+    const result = await cli([server.endpoint], { entry, timeout: 90_000 });
     assert.equal(result.code, 0, result.output);
-    assert.deepEqual(reads, ["launcher", "saved-thread", "saved-thread"]);
+    assert.deepEqual(reads, [
+      "launcher",
+      "saved-thread",
+      "saved-thread",
+      "fresh-thread",
+      "fresh-thread",
+    ]);
+    assert.deepEqual(archived, [
+      { threadId: "fresh-thread", action: "archive" },
+    ]);
     assert.deepEqual(
-      sent,
-      new Map([
+      sent.map(({ threadId, message }) => [threadId, message]),
+      [
         ["fresh-thread", "Assignment"],
         ["saved-thread", "continue"],
-      ]),
+        ["fresh-thread", "retry"],
+        ["fresh-thread", "retry"],
+        ["saved-thread", "rejected"],
+        ["saved-thread", "rejected"],
+        ["saved-thread", "rejected"],
+      ],
     );
+    const ids = sent.map(({ clientRequestId }) => clientRequestId);
+    assert.ok(ids.every((id) => /^[0-9a-f-]{36}$/.test(id)));
+    assert.equal(new Set(ids).size, 4);
+    assert.equal(ids[2], ids[3]);
+    assert.equal(ids[4], ids[5]);
+    assert.equal(ids[4], ids[6]);
   } finally {
     await server.close();
   }
@@ -772,11 +819,13 @@ async function gitFixture() {
   git(checkout, "commit", "--allow-empty", "-m", "Initial commit");
   git(launch, "clone", "--bare", checkout, origin);
   git(checkout, "remote", "add", "origin", origin);
-  const worktree = () =>
-    git(checkout, "worktree", "list", "--porcelain", "-z")
+  const worktree = () => {
+    const path = git(checkout, "worktree", "list", "--porcelain", "-z")
       .split("\0")
       .filter((field) => field.startsWith("worktree "))[1]
       ?.slice("worktree ".length);
+    return path && resolve(path);
+  };
   const commit = async (worktree, message) => {
     await writeFile(join(worktree, "fixture.txt"), message);
     git(worktree, "add", "fixture.txt");
@@ -789,14 +838,11 @@ async function gitFixture() {
 async function coreFixture() {
   const { checkout, worktree, commit } = await gitFixture();
   const project = join(launch, "demo");
-  const commands = join(launch, "commands");
   const stateFile = join(launch, "fixture.json");
   const log = join(launch, "run.log");
-  await mkdir(commands);
   await writeFile(stateFile, "{}");
-  const dest = join(commands, "gh");
+  const dest = join(launch, "gh.mjs");
   await copyFile(new URL("./fixtures/core-command.mjs", import.meta.url), dest);
-  await chmod(dest, 0o755);
   const fixture = async () => ({
     ...JSON.parse(await readFile(stateFile, "utf8")),
     worktree: worktree(),
@@ -835,7 +881,7 @@ async function coreFixture() {
       },
     });
     // A fallback to Core's base startup delay must not pass these tests.
-    config.terminalPlugins.agentStartDelay = 60;
+    config.terminalPlugins.agentStartDelay = 120;
     config.terminalPlugins.enhancements = { retryLimit: 0 };
     await writeFile(configPath, stringify(config));
     await writeFile(join(project, "prompts", "implement.md"), marker);
@@ -848,10 +894,11 @@ async function coreFixture() {
     cli(["run", "--project", "demo", "--issue", "42"], {
       log,
       control,
-      timeout,
+      timeout: process.platform === "win32" ? 90_000 : timeout,
       env: {
         T3CODE_THREAD_ID: "launcher-thread",
-        PATH: `${commands}${delimiter}${process.env.PATH}`,
+        NODE_OPTIONS: `--import=${new URL("./fixtures/core-command-preload.mjs", import.meta.url).href}`,
+        FIXTURE_GH_ENTRY: dest,
         FIXTURE_STATE: stateFile,
       },
     });
@@ -859,6 +906,7 @@ async function coreFixture() {
 }
 
 const receipt = ["receipt"];
+const corePhaseTimeout = process.platform === "win32" ? 60_000 : 15_000;
 const lostReplies = ["drop", "malformed", "receipt"];
 const exhausted = ["drop", "drop", "drop"];
 const retryExhausted = /Retry budget exhausted after 3 attempts/;
@@ -953,7 +1001,7 @@ const scenarios = [
 for (const scenario of scenarios)
   test(
     `native task thread: ${scenario.name}`,
-    { skip: process.platform === "win32" },
+    { skip: process.platform === "win32" && scenario.name !== "normal" },
     async () => {
       const { log, fixture, checkpoint, initialize, runCli } =
         await coreFixture();
@@ -1166,7 +1214,7 @@ for (const scenario of scenarios)
         const run = runCli(undefined, 60_000);
         if (!scenario.errors) {
           // Observe the pending checkpoint after the server finishes sending a valid receipt, before Agent completion.
-          const deadline = Date.now() + 40_000;
+          const deadline = Date.now() + Math.max(40_000, corePhaseTimeout);
           const validSendResponseFinished = () =>
             server.state.finishedToolResponses.some(
               ({ name, payload }) =>
@@ -1259,7 +1307,7 @@ for (const scenario of scenarios)
 for (const mode of ["recover-handoff", "recover-enter"])
   test(
     `fresh CLI resumes interrupted implementation (${mode})`,
-    { skip: process.platform === "win32" },
+    { skip: process.platform === "win32" && mode !== "recover-enter" },
     async () => {
       const { log, fixture, checkpoint, initialize, runCli } =
         await coreFixture();
@@ -1391,7 +1439,7 @@ for (const mode of ["recover-handoff", "recover-enter"])
           child = process;
         });
         // Observe the acknowledged prompt's pending checkpoint before simulating Agent completion.
-        const deadline = Date.now() + 15_000;
+        const deadline = Date.now() + corePhaseTimeout;
         const validSendResponseFinished = () =>
           server.state.finishedToolResponses.some(
             ({ name, payload }) =>
@@ -1444,7 +1492,7 @@ for (const mode of ["recover-handoff", "recover-enter"])
           assert.equal(taskReads, 1, "Saved pause must precede retry");
           child.stdin.write("\n");
           await waitForOutput(log, /handoff=/, run);
-          const deadline = Date.now() + 10_000;
+          const deadline = Date.now() + corePhaseTimeout;
           while (history.length < 2 && Date.now() < deadline)
             await new Promise((resolve) => setTimeout(resolve, 50));
           assert.equal(history.length, 2);
@@ -1489,7 +1537,7 @@ for (const mode of ["recover-handoff", "recover-enter"])
   );
 
 async function waitForOutput(log, pattern, run) {
-  const deadline = Date.now() + 15_000;
+  const deadline = Date.now() + corePhaseTimeout;
   while (Date.now() < deadline) {
     if (pattern.test(readFileSync(log, "utf8"))) return;
     const early = await Promise.race([

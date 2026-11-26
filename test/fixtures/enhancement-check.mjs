@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { contractVersion, createEnhancement } from "issue-runner-agent-t3";
-const { createT3Terminal } = await import(
+const { boundTabs, createT3Terminal } = await import(
   new URL("./terminal.js", import.meta.resolve("issue-runner-agent-t3"))
 );
 
@@ -10,6 +10,14 @@ const terminal = await createT3Terminal(endpoint, "launcher");
 const options = { cwd: process.cwd(), env: {}, submitKey: "Enter" };
 const fresh = await terminal.createTab({ ...options, label: "fresh" });
 const resumed = await terminal.createTab({ ...options, label: "resumed" });
+const freshState = boundTabs.get(fresh.io);
+const resumedState = boundTabs.get(resumed.io);
+assert.notEqual(freshState, resumedState);
+for (const state of [freshState, resumedState]) {
+  assert.equal(state.endpoint, endpoint);
+  assert.equal(state.threadId, undefined);
+  assert.deepEqual(state.receipts, []);
+}
 const context = {
   cwd: options.cwd,
   env: {},
@@ -36,12 +44,44 @@ assert.equal(
 );
 assert.equal(await b.waitUntilReady(), "saved-thread");
 assert.equal(await a.waitUntilReady(), "fresh-thread");
+assert.equal(freshState.threadId, "fresh-thread");
+assert.equal(resumedState.threadId, "saved-thread");
 a.onAssignment({ id: "fresh-assignment", expectedFile: "fresh.json" });
 b.onAssignment({ id: "resumed-assignment", expectedFile: "resumed.json" });
-await Promise.all([
-  fresh.io.submitText("Assignment"),
-  resumed.io.submitText("continue"),
-]);
+const freshReceipt = {
+  threadId: "fresh-thread",
+  runId: "fresh-run-1",
+  messageId: "fresh-message-1",
+};
+const retriedReceipt = {
+  threadId: "fresh-thread",
+  runId: "fresh-run-2",
+  messageId: "fresh-message-2",
+};
+const resumedReceipt = {
+  threadId: "saved-thread",
+  runId: "saved-run-1",
+  messageId: "saved-message-1",
+};
+await fresh.io.submitText("Assignment");
+assert.deepEqual(freshState.receipts, [freshReceipt]);
+assert.deepEqual(resumedState.receipts, []);
+await resumed.io.submitText("continue");
+await fresh.io.submitText("retry");
+assert.deepEqual(freshState.receipts, [freshReceipt, retriedReceipt]);
+assert.deepEqual(resumedState.receipts, [resumedReceipt]);
+await assert.rejects(
+  resumed.io.submitText("rejected"),
+  /Retry budget exhausted/,
+);
+assert.deepEqual(freshState.receipts, [freshReceipt, retriedReceipt]);
+assert.deepEqual(resumedState.receipts, [resumedReceipt]);
 await a.stop();
+await terminal.closeTab(fresh.handle);
+assert.equal(freshState.threadId, undefined);
+assert.deepEqual(freshState.receipts, []);
+assert.equal(resumedState.endpoint, endpoint);
+assert.equal(resumedState.threadId, "saved-thread");
+assert.deepEqual(resumedState.receipts, [resumedReceipt]);
 assert.equal(await b.waitUntilReady(), "saved-thread");
 await b.stop();
