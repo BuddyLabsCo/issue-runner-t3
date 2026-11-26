@@ -35,26 +35,35 @@ For a nondefault endpoint, append its URL to both commands and reuse it when ini
 
 ## Setup and launch
 
-In the conversation for the repository you want to work on:
+In the T3 Project conversation:
 
-1. `$issue-runner-t3 setup` — check the host and credentials, then approve any repairs, including installing Runner if needed.
-2. `$issue-runner-t3 init` — configure the Project under `~/.issue-runner-t3/runner` and review its User Prompts.
-3. `$issue-runner-t3 run` — choose Issues or Documentation Maintenance and launch Runner in the current conversation's terminal.
+1. `$issue-runner-t3 setup` — check prerequisites.
+2. `$issue-runner-t3 init` — configure the Project and User Prompts.
+3. `$issue-runner-t3 run` — launch Runner.
 
-Use `$issue-runner-t3 cleanup` to delete Project files, including saved Run state, while preserving `config.yaml` and `prompts`.
+- `$issue-runner-t3 upgrade` — update Runner and the Skill.
+- `$issue-runner-t3 cleanup` — remove Project state, preserving `config.yaml` and `prompts/`.
 
-### Missing handoff recovery
+## Configuration
 
-Runner requests recovery when an eligible task Thread finishes or is interrupted without producing its expected handoff. Configure `terminalPlugins.enhancements` in the Project’s `config.yaml`:
+T3 settings in `~/.issue-runner-t3/runner/<project>/config.yaml`:
 
-- `retryLimit`: nonnegative integer, default `3`; `0` disables recovery but keeps Enhancement Pause.
-- `handoffRecoveryDelaySeconds`: finite nonnegative seconds, default `120`.
-- `logLevel`: `error` (default) or `info` for timer events.
+```yaml
+terminalPlugins:
+  mcpUrl: http://127.0.0.1:3773/mcp
+  pauseGuidance: true # Diagnostic advice on terminal confirmations
+  enhancements:
+    retryLimit: 3 # 0 disables missing-handoff recovery
+    handoffRecoveryDelaySeconds: 120
+    logLevel: error # error or info
 
-### Pause guidance
-
-By default, Runner queues diagnostic advice in the launcher conversation when a terminal confirmation becomes active. The prompt includes the latest 15 lines of Runner output. Choose the confirmation option yourself in the terminal; advice never resolves a pause.
-
-To disable output collection and diagnostic messages, set `terminalPlugins.pauseGuidance` to `false` in the Project's `config.yaml`.
+agents:
+  implement:
+    agent: t3
+    start: 't3 start --provider <instance-id> --model <model>' # Optional: --option <id>=<value>
+    resume: 't3 resume {sessionref}'
+    submitKey: Enter
+  # Same settings for review, ciRepair, conflictRepair and documentation.
+```
 
 See the [code architecture](docs/code-architecture.md) for module ownership and the [T3 protocol](docs/t3-protocol.md) for native interfaces and interaction sequences.
