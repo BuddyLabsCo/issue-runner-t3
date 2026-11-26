@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.3
+## 1.0.0
 
 - docs: [issue-78] remove legacy npm package note from prerequisites (#79)
 - chore: propose release v0.1.3 (#73)
