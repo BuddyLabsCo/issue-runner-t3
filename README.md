@@ -40,21 +40,20 @@ In the T3 Project conversation:
 1. `$issue-runner-t3 setup` — check prerequisites.
 2. `$issue-runner-t3 init` — configure the Project and User Prompts.
 3. `$issue-runner-t3 run` — launch Runner.
-
-- `$issue-runner-t3 upgrade` — update Runner and the Skill.
-- `$issue-runner-t3 cleanup` — remove Project state, preserving `config.yaml` and `prompts/`.
+4. `$issue-runner-t3 upgrade` — update Runner and the Skill.
+5. `$issue-runner-t3 cleanup` — remove Project state, preserving `config.yaml` and `prompts/`.
 
 ## Configuration
 
-T3 settings in `~/.issue-runner-t3/runner/<project>/config.yaml`:
+T3 related settings in `~/.issue-runner-t3/runner/<project>/config.yaml`:
 
 ```yaml
 terminalPlugins:
-  mcpUrl: http://127.0.0.1:3773/mcp
-  pauseGuidance: true # Diagnostic advice on terminal confirmations
+  mcpUrl: http://127.0.0.1:3773/mcp # optional, required if use non-default mcp url.
+  pauseGuidance: true # optional, default to true. Provide diagnostic advice in the T3 conversation when Runner pauses for operator input.
   enhancements:
-    retryLimit: 3 # 0 disables missing-handoff recovery
-    handoffRecoveryDelaySeconds: 120
+    retryLimit: 3 # optional, default to 3. 0 disables missing-handoff recovery.
+    handoffRecoveryDelaySeconds: optional, default to 120. Seconds to wait before requesting recovery for a missing handoff.
     logLevel: error # error or info
 
 agents:
@@ -62,7 +61,6 @@ agents:
     agent: t3
     start: 't3 start --provider <instance-id> --model <model>' # Optional: --option <id>=<value>
     resume: 't3 resume {sessionref}'
-    submitKey: Enter
   # Same settings for review, ciRepair, conflictRepair and documentation.
 ```
 
