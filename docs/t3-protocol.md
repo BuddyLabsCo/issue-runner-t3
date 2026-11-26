@@ -11,7 +11,7 @@ The T3 plugin targets [T3 Code](https://github.com/pingdotgg/t3code) v0.1.11 and
 | `t3_project_list` | `limit: 1` | Check authorization with an authenticated read |
 | `t3_thread_read` | `threadId` | Resolve the launcher's Project and verify saved or owned thread identities and state |
 | `t3_thread_launch` | `projectId`, `title`, `modelSelection`, `workspaceStrategy`, `clientRequestId` | Create an idle task thread in the existing Core Worktree |
-| `t3_thread_send` | `threadId`, `message`, `clientRequestId` | Submit the complete Assignment prompt |
+| `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Submit the complete Assignment prompt |
 | `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Queue diagnostic advice in the launcher Thread |
 | `t3_queue` | `threadId`, `action: "list"`, `limit: 1` | Check for queued turns before resume or archival |
 | `t3_thread_organize` | `threadId`, `action: "unarchive"` or `"archive"` | Reopen or archive a task thread without deleting its history |
@@ -21,7 +21,7 @@ The plugin uses the [T3 MCP tool contracts](https://github.com/pingdotgg/t3code/
 
 Runner signs in through T3's [external MCP authorization](https://github.com/pingdotgg/t3code/blob/main/docs/user/outside-agents.md) with OAuth authorization code and PKCE. It requests `orchestration:read` and `orchestration:operate`, stores the granted token, scope and expiry privately under `~/.issue-runner-t3`, and checks them before each logical MCP call. The file key is the SHA-256 of the normalized endpoint URL. Runner does not refresh expired credentials.
 
-`createTab` returns an opaque handle and bound I/O without creating a native thread. The plugin interprets `t3 start --provider <instance-id> --model <model> [--option <id>=<value>]` and `t3 resume {sessionref}` itself. Start maps to `modelSelection: {instanceId, model, options: [{id, value}]}` and `workspaceStrategy: {type: "existing_worktree", worktreePath: cwd}`. The native thread ID becomes Core's `sessionref`; screen reads and key chords are unsupported.
+`createTab` returns an opaque handle and bound I/O without creating a native thread. The plugin interprets `t3 start --provider <instance-id> --model <model> [--option <id>=<value>]` and `t3 resume {sessionref}` itself. Start maps to `modelSelection: {instanceId, model, options: [{id, value}]}` and `workspaceStrategy: {type: "existing_worktree", worktreePath: cwd}`. The native thread ID becomes Core's `sessionref`; screen reads and key chords are unsupported. Core discovers the bundled Enhancement from the `issue-runner-agent-t3` package root when an Agent uses `agent: t3`. The Enhancement uses the bound Tab I/O to return the exact native thread ID without a readiness probe.
 
 Resume and archival require `activeRunId: null` and status `idle`, `completed`, `failed`, `cancelled`, `interrupted` or `rolled_back`, unless archival is already complete. Identity and queue checks are preflight checks, not atomic with mutations.
 
@@ -131,7 +131,7 @@ sequenceDiagram
     Note over C: Print stage, thread ID and expected handoff path
     C->>P: Bound io.submitText(complete Assignment)
     Note over P: Require owned bound thread and non-aborted signal
-    P->>N: t3_thread_send (threadId, message, clientRequestId)
+    P->>N: t3_thread_send (threadId, message, mode: queue, clientRequestId)
     N-->>P: threadId, messageId, runId
     Note over P: Require matching thread ID and nonempty message and run IDs
     P-->>C: Delivery acknowledged

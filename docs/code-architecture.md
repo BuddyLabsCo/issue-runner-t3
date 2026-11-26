@@ -9,6 +9,7 @@ This map describes where code belongs. The [Core integration contract](https://g
 |-- src/
 |   |-- cli.ts                 # Executable and Core integration
 |   |-- terminal.ts            # Native T3 task adapter
+|   |-- enhancement.ts         # Core-discovered T3 Enhancement
 |   |-- pause-guidance.ts      # Run-level confirmation observer
 |   |-- authorization.ts       # MCP transport and authorization checks
 |   |-- credentials.ts         # Endpoint and credential storage
@@ -31,6 +32,7 @@ This map describes where code belongs. The [Core integration contract](https://g
 | --- | --- |
 | `src/cli.ts` | Parse Runner commands, resolve the effective MCP endpoint, and prepare T3-specific Project settings. Delegate initialization and workflow execution to Core's `runCli`. |
 | `src/terminal.ts` | Implement Core's terminal contract using native T3 threads. Own task handles, Project and thread identity, start/resume mapping, prompt delivery and archival. |
+| `src/enhancement.ts` | Expose Enhancement Contract v3 at the package root. Resolve readiness from the Adapter’s private Tab state. |
 | `src/pause-guidance.ts` | Observe active Core confirmations without owning input. Queue diagnostics in the launcher Thread and cancel outstanding delivery when the confirmation ends. |
 | `src/authorization.ts` | Connect to the MCP endpoint, make authenticated tool calls, validate authorization and handle timeouts, rejections and retries. |
 | `src/credentials.ts` | Normalize endpoint URLs, store credentials privately per endpoint, and enforce token expiry and granted scope. |
@@ -43,4 +45,4 @@ This map describes where code belongs. The [Core integration contract](https://g
 | `docs/` | Explain the architecture and native protocol. Keep Agent instructions under `docs/agents/`. |
 | Core | Own Issue selection and Batches, Worktrees, Assignment dispatch, checkpoints, handoff verification, GitHub operations, integration and recovery. |
 
-Keep T3-specific behavior in the T3 adapter or Skill. Shared workflow policy belongs to Core. Build output under `dist/` is generated from `src/`, not edited directly.
+Keep T3-specific behavior in the T3 Adapter, Enhancement or Skill. Shared workflow policy belongs to Core. Build output under `dist/` is generated from `src/`, not edited directly.

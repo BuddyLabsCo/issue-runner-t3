@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { runCli } from "issue-runner-core/cli";
 import { terminalContractVersion } from "issue-runner-core/terminal";
@@ -11,7 +11,6 @@ import { checkAuthorization } from "./authorization.js";
 import { defaultEndpoint, normalizeEndpoint } from "./credentials.js";
 import { login } from "./oauth.js";
 import { startPauseGuidance } from "./pause-guidance.js";
-import { createT3Terminal } from "./terminal.js";
 
 const commandName = "issue-runner-t3";
 const packageRoot = fileURLToPath(new URL("../", import.meta.url));
@@ -155,6 +154,12 @@ async function runCore() {
         const endpoint = normalizeEndpoint(
           (config as { mcpUrl?: unknown }).mcpUrl,
         );
+        // Match Core's canonical Enhancement path even when the CLI uses a Windows short path.
+        const terminalPath = await realpath(
+          join(packageRoot, "dist", "terminal.js"),
+        );
+        const { createT3Terminal }: typeof import("./terminal.js") =
+          await import(pathToFileURL(terminalPath).href);
         return createT3Terminal(endpoint, process.env.T3CODE_THREAD_ID!);
       },
     },

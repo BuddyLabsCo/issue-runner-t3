@@ -122,6 +122,8 @@ export async function substitute(
       }
       assert.equal(rpc.method, "tools/call");
       if (rpc.params.name !== "t3_project_list") {
+        if (rpc.params.name === "t3_thread_send")
+          assert.equal(rpc.params.arguments.mode, "queue");
         const payload = await taskTool(
           rpc.params.name,
           rpc.params.arguments,

@@ -51,7 +51,7 @@ await posixTest(
       /Retained artifact: verified-t3-release/,
     );
     assert.equal(handoff.version, "0.1.0");
-    assert.equal(handoff.package, "issue-runner-t3");
+    assert.equal(handoff.package, "issue-runner-agent-t3");
     assert.equal(
       handoff.integrity,
       `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,

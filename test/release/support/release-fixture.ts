@@ -94,7 +94,7 @@ export interface FixtureOptions {
 function defaultManifest(options: FixtureOptions): Record<string, unknown> {
   return (
     options.manifest ?? {
-      name: "issue-runner-t3",
+      name: "issue-runner-agent-t3",
       private: true,
       type: "module",
     }
