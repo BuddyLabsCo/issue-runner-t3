@@ -10,6 +10,7 @@
   },
   "files": [
     "dist",
+    "prompts/runner-pause-guidance.md",
     "skills/issue-runner-t3"
   ],
   "engines": {

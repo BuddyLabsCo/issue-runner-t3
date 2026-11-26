@@ -12,6 +12,7 @@ The T3 plugin targets [T3 Code](https://github.com/pingdotgg/t3code) v0.1.11 and
 | `t3_thread_read` | `threadId` | Resolve the launcher's Project and verify saved or owned thread identities and state |
 | `t3_thread_launch` | `projectId`, `title`, `modelSelection`, `workspaceStrategy`, `clientRequestId` | Create an idle task thread in the existing Core Worktree |
 | `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Submit the complete Assignment prompt |
+| `t3_thread_send` | `threadId`, `message`, `mode: "queue"`, `clientRequestId` | Queue diagnostic advice in the launcher Thread |
 | `t3_queue` | `threadId`, `action: "list"`, `limit: 1` | Check for queued turns before resume or archival |
 | `t3_thread_organize` | `threadId`, `action: "unarchive"` or `"archive"` | Reopen or archive a task thread without deleting its history |
 | `t3_thread_update` | `threadId`, `action: "rename"`, `title` | Update the saved thread's title to the current Core stage label |

@@ -297,7 +297,11 @@ await test("the renamed T3 package preserves its CLI and Skill identity", () => 
   assert.equal(manifest.license, "MIT");
   assert.equal(manifest.exports, "./dist/enhancement.js");
   assert.deepEqual(manifest.bin, { "issue-runner-t3": "dist/cli.js" });
-  assert.deepEqual(manifest.files, ["dist", "skills/issue-runner-t3"]);
+  assert.deepEqual(manifest.files, [
+    "dist",
+    "prompts/runner-pause-guidance.md",
+    "skills/issue-runner-t3",
+  ]);
   assert.deepEqual(manifest.repository, {
     type: "git",
     url: "git+https://github.com/BuddyLabsCo/issue-runner-t3.git",
