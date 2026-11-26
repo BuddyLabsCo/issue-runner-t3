@@ -6,8 +6,20 @@ import type {
   CreateTabOptions,
   TabHandle,
   TerminalPlugin,
+  TerminalIO,
 } from "issue-runner-core/terminal";
 import { callMcp, checkAuthorization } from "./authorization.js";
+
+type SendReceipt = { threadId: string; runId: string; messageId: string };
+type TabState = {
+  endpoint: string;
+  options: CreateTabOptions;
+  threadId?: string;
+  receipts: SendReceipt[];
+};
+
+// Core gives the Enhancement the exact I/O object returned for this Tab.
+export const boundTabs = new WeakMap<TerminalIO, TabState>();
 
 const startUsage =
   "Expected t3 start --provider <instance-id> --model <model> [--option <id>=<value>].";
@@ -233,10 +245,7 @@ export async function createT3Terminal(
 ): Promise<TerminalPlugin> {
   const launcher = await readThread(endpoint, launcherId);
   const projectId = launcher.projectId;
-  const handles = new Map<
-    TabHandle,
-    { options: CreateTabOptions; threadId?: string }
-  >();
+  const handles = new Map<TabHandle, TabState>();
   function owned(handle: TabHandle) {
     const tab = handles.get(handle);
     if (!tab) throw new Error("Unknown T3 task handle.");
@@ -256,45 +265,51 @@ export async function createT3Terminal(
       }
       await checkAuthorization(endpoint);
       const handle = {};
-      handles.set(handle, { options });
-      return {
-        handle,
-        io: {
-          async read() {
-            throw new Error("Native T3 chat has no terminal screen.");
-          },
-          async sendKeys() {
-            throw new Error(
-              "Native T3 chat does not support terminal key chords.",
-            );
-          },
-          async submitText(message) {
-            const tab = owned(handle);
-            tab.options.signal?.throwIfAborted();
-            if (!tab.threadId)
-              throw new Error("T3 task handle is not bound to a thread.");
-            await call(
-              endpoint,
-              "t3_thread_send",
-              {
-                threadId: tab.threadId,
-                message,
-                clientRequestId: randomUUID(),
-              },
-              {
-                acknowledged: (result) =>
-                  result.threadId === tab.threadId &&
-                  typeof result.messageId === "string" &&
-                  !!result.messageId &&
-                  typeof result.runId === "string" &&
-                  !!result.runId,
-                uncertainEffect: `The prompt may already have reached T3 thread ${tab.threadId}. Inspect it before continuing; signing in again changes the deduplication scope.`,
-                signal: tab.options.signal,
-              },
-            );
-          },
+      const tab: TabState = { endpoint, options, receipts: [] };
+      handles.set(handle, tab);
+      const io: TerminalIO = {
+        async read() {
+          throw new Error("Native T3 chat has no terminal screen.");
+        },
+        async sendKeys() {
+          throw new Error(
+            "Native T3 chat does not support terminal key chords.",
+          );
+        },
+        async submitText(message) {
+          const tab = owned(handle);
+          tab.options.signal?.throwIfAborted();
+          if (!tab.threadId)
+            throw new Error("T3 task handle is not bound to a thread.");
+          const receipt = await call(
+            endpoint,
+            "t3_thread_send",
+            {
+              threadId: tab.threadId,
+              message,
+              mode: "queue",
+              clientRequestId: randomUUID(),
+            },
+            {
+              acknowledged: (result) =>
+                result.threadId === tab.threadId &&
+                typeof result.messageId === "string" &&
+                !!result.messageId.trim() &&
+                typeof result.runId === "string" &&
+                !!result.runId.trim(),
+              uncertainEffect: `The prompt may already have reached T3 thread ${tab.threadId}. Inspect it before continuing; signing in again changes the deduplication scope.`,
+              signal: tab.options.signal,
+            },
+          );
+          tab.receipts.push({
+            threadId: tab.threadId,
+            runId: receipt.runId as string,
+            messageId: receipt.messageId as string,
+          });
         },
       };
+      boundTabs.set(io, tab);
+      return { handle, io };
     },
     async execute(handle, command) {
       const tab = owned(handle);
@@ -353,6 +368,8 @@ export async function createT3Terminal(
         }
       }
       handles.delete(handle);
+      delete tab.threadId;
+      tab.receipts.length = 0;
     },
   };
 }

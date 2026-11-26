@@ -28,6 +28,7 @@ import {
   LOCKFILE_FILE,
   MANIFEST_FILE,
   PACKAGE_NAME,
+  EXECUTABLE_NAME,
   RELEASE_BRANCH,
   REPOSITORY,
   TARGET_BRANCH,
@@ -214,12 +215,15 @@ function validateReadiness(
     problems.push(`${MANIFEST_FILE} must declare the supported Node engines`);
   }
   const bin = manifest.bin as Record<string, unknown> | undefined;
-  if (bin?.[PACKAGE_NAME] !== "dist/cli.js" || Object.keys(bin).length !== 1)
+  if (bin?.[EXECUTABLE_NAME] !== "dist/cli.js" || Object.keys(bin).length !== 1)
     problems.push(
-      `${MANIFEST_FILE} must declare the issue-runner-t3 executable`,
+      `${MANIFEST_FILE} must declare the ${EXECUTABLE_NAME} executable`,
     );
+  if (manifest.exports !== "./dist/enhancement.js")
+    problems.push(`${MANIFEST_FILE} must export the bundled T3 Enhancement`);
   for (const file of [
     "dist/cli.js",
+    "dist/enhancement.js",
     "dist/authorization.js",
     "dist/credentials.js",
     "dist/oauth.js",
@@ -350,7 +354,7 @@ function publishToRegistry(tarball: string, version: string): void {
         /E401|E403|E404|ENEEDAUTH|authenticate|permission|oidc/i.test(detail)
       ) {
         throw new Error(
-          `npm publish was rejected by the registry: ${detail}\nCheck the issue-runner-t3 Trusted Publisher for BuddyLabsCo/issue-runner-t3, workflow publish-release.yml and its environment; verify direct publishing permission, the two-day first-publication window, matching repository.url, Node >=22.14.0 and npm >=11.5.1. No npm token fallback is supported.`,
+          `npm publish was rejected by the registry: ${detail}\nCheck the ${PACKAGE_NAME} Trusted Publisher for BuddyLabsCo/issue-runner-t3, workflow publish-release.yml and its environment; verify direct publishing permission, the two-day first-publication window, matching repository.url, Node >=22.14.0 and npm >=11.5.1. No npm token fallback is supported.`,
         );
       }
       throw new Error(

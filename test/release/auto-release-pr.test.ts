@@ -17,11 +17,11 @@ function commitReleaseFiles(
   const before = fixture.head();
   fixture.write(
     "package.json",
-    `${JSON.stringify({ name: "issue-runner-t3", version, type: "module" }, null, 2)}\n`,
+    `${JSON.stringify({ name: "issue-runner-agent-t3", version, type: "module" }, null, 2)}\n`,
   );
   fixture.write(
     "package-lock.json",
-    `${JSON.stringify({ name: "issue-runner-t3", version, lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-t3", version } } }, null, 2)}\n`,
+    `${JSON.stringify({ name: "issue-runner-agent-t3", version, lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-agent-t3", version } } }, null, 2)}\n`,
   );
   fixture.write(
     "CHANGELOG.md",
@@ -94,7 +94,7 @@ await posixTest(
   (t) => {
     const fixture = createReleaseFixture(t, {
       manifest: {
-        name: "issue-runner-t3",
+        name: "issue-runner-agent-t3",
         version: "0.1.0",
         type: "module",
       },
@@ -124,7 +124,7 @@ await posixTest(
   (t) => {
     const fixture = createReleaseFixture(t, {
       manifest: {
-        name: "issue-runner-t3",
+        name: "issue-runner-agent-t3",
         version: "0.1.0",
         type: "module",
       },
@@ -161,7 +161,7 @@ await posixTest(
 await posixTest("a proposal normalizes changelog spacing and bullets", (t) => {
   const fixture = createReleaseFixture(t, {
     manifest: {
-      name: "issue-runner-t3",
+      name: "issue-runner-agent-t3",
       version: "0.1.0",
       type: "module",
     },
@@ -236,7 +236,11 @@ await posixTest(
 // and must not start the next proposal.
 await posixTest("a release-only merge proposes nothing", (t) => {
   const fixture = createReleaseFixture(t, {
-    manifest: { name: "issue-runner-t3", version: "0.1.0", type: "module" },
+    manifest: {
+      name: "issue-runner-agent-t3",
+      version: "0.1.0",
+      type: "module",
+    },
     files: { "dist/cli.js": "export {};\n" },
   });
   fixture.git("tag", "v0.1.0");
@@ -244,11 +248,11 @@ await posixTest("a release-only merge proposes nothing", (t) => {
   const before = fixture.head();
   fixture.write(
     "package.json",
-    `${JSON.stringify({ name: "issue-runner-t3", version: "0.1.1", type: "module" }, null, 2)}\n`,
+    `${JSON.stringify({ name: "issue-runner-agent-t3", version: "0.1.1", type: "module" }, null, 2)}\n`,
   );
   fixture.write(
     "package-lock.json",
-    `${JSON.stringify({ name: "issue-runner-t3", version: "0.1.1", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-t3", version: "0.1.1" } } }, null, 2)}\n`,
+    `${JSON.stringify({ name: "issue-runner-agent-t3", version: "0.1.1", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-agent-t3", version: "0.1.1" } } }, null, 2)}\n`,
   );
   fixture.write(
     "CHANGELOG.md",
@@ -280,13 +284,17 @@ await posixTest("a release-only merge proposes nothing", (t) => {
 // increase the version. It is still the release merge and must not propose.
 await posixTest("merging a seeded first proposal proposes nothing", (t) => {
   const fixture = createReleaseFixture(t, {
-    manifest: { name: "issue-runner-t3", version: "0.1.0", type: "module" },
+    manifest: {
+      name: "issue-runner-agent-t3",
+      version: "0.1.0",
+      type: "module",
+    },
     files: { "dist/cli.js": "export {};\n" },
   });
   const before = fixture.head();
   fixture.write(
     "package-lock.json",
-    `${JSON.stringify({ name: "issue-runner-t3", version: "0.1.0", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-t3", version: "0.1.0" } } }, null, 2)}\n`,
+    `${JSON.stringify({ name: "issue-runner-agent-t3", version: "0.1.0", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-agent-t3", version: "0.1.0" } } }, null, 2)}\n`,
   );
   fixture.write(
     "CHANGELOG.md",
@@ -321,7 +329,7 @@ await posixTest(
   (t) => {
     const fixture = createReleaseFixture(t, {
       manifest: {
-        name: "issue-runner-t3",
+        name: "issue-runner-agent-t3",
         version: "0.1.0",
         type: "module",
       },
@@ -356,7 +364,7 @@ await posixTest(
   (t) => {
     const fixture = createReleaseFixture(t, {
       manifest: {
-        name: "issue-runner-t3",
+        name: "issue-runner-agent-t3",
         version: "0.1.0",
         type: "module",
       },
@@ -365,11 +373,11 @@ await posixTest(
     const before = commitReleaseFiles(fixture, "0.1.0", "chore: release 0.1.0");
     fixture.write(
       "package.json",
-      `${JSON.stringify({ name: "issue-runner-t3", version: "1.0.0", type: "module" }, null, 2)}\n`,
+      `${JSON.stringify({ name: "issue-runner-agent-t3", version: "1.0.0", type: "module" }, null, 2)}\n`,
     );
     fixture.write(
       "package-lock.json",
-      `${JSON.stringify({ name: "issue-runner-t3", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-t3", version: "1.0.0" } } }, null, 2)}\n`,
+      `${JSON.stringify({ name: "issue-runner-agent-t3", version: "1.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-agent-t3", version: "1.0.0" } } }, null, 2)}\n`,
     );
     fixture.git("add", ".");
     fixture.git("commit", "-m", "chore: maintain the major version");
@@ -397,7 +405,7 @@ await posixTest(
   (t) => {
     const fixture = createReleaseFixture(t, {
       manifest: {
-        name: "issue-runner-t3",
+        name: "issue-runner-agent-t3",
         version: "0.1.0",
         type: "module",
       },
@@ -408,11 +416,11 @@ await posixTest(
     const before = fixture.head();
     fixture.write(
       "package.json",
-      `${JSON.stringify({ name: "issue-runner-t3", version: "0.1.0", type: "module", dependencies: { yaml: "2.9.1" } }, null, 2)}\n`,
+      `${JSON.stringify({ name: "issue-runner-agent-t3", version: "0.1.0", type: "module", dependencies: { yaml: "2.9.1" } }, null, 2)}\n`,
     );
     fixture.write(
       "package-lock.json",
-      `${JSON.stringify({ name: "issue-runner-t3", version: "0.1.0", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-t3", version: "0.1.0", dependencies: { yaml: "2.9.1" } } } }, null, 2)}\n`,
+      `${JSON.stringify({ name: "issue-runner-agent-t3", version: "0.1.0", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-agent-t3", version: "0.1.0", dependencies: { yaml: "2.9.1" } } } }, null, 2)}\n`,
     );
     fixture.git("add", ".");
     fixture.git("commit", "-m", "chore: bump yaml");
@@ -445,7 +453,7 @@ await posixTest(
   (t) => {
     const fixture = createReleaseFixture(t, {
       manifest: {
-        name: "issue-runner-t3",
+        name: "issue-runner-agent-t3",
         version: "0.2.0",
         type: "module",
       },
@@ -500,7 +508,7 @@ await posixTest(
   (t) => {
     const fixture = createReleaseFixture(t, {
       manifest: {
-        name: "issue-runner-t3",
+        name: "issue-runner-agent-t3",
         version: "0.1.0",
         type: "module",
       },
@@ -511,11 +519,11 @@ await posixTest(
     fixture.git("checkout", "-b", "auto-release");
     fixture.write(
       "package.json",
-      `${JSON.stringify({ name: "issue-runner-t3", version: "2.0.0", type: "module" }, null, 2)}\n`,
+      `${JSON.stringify({ name: "issue-runner-agent-t3", version: "2.0.0", type: "module" }, null, 2)}\n`,
     );
     fixture.write(
       "package-lock.json",
-      `${JSON.stringify({ name: "issue-runner-t3", version: "2.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-t3", version: "2.0.0" } } }, null, 2)}\n`,
+      `${JSON.stringify({ name: "issue-runner-agent-t3", version: "2.0.0", lockfileVersion: 3, requires: true, packages: { "": { name: "issue-runner-agent-t3", version: "2.0.0" } } }, null, 2)}\n`,
     );
     fixture.git("add", ".");
     fixture.git("commit", "-m", "chore: propose release v2.0.0");
@@ -561,7 +569,11 @@ await posixTest(
   "a malformed manifest version fails without a proposal",
   (t) => {
     const fixture = createReleaseFixture(t, {
-      manifest: { name: "issue-runner-t3", version: "1.10", type: "module" },
+      manifest: {
+        name: "issue-runner-agent-t3",
+        version: "1.10",
+        type: "module",
+      },
       files: { "dist/cli.js": "export {};\n" },
     });
     const before = fixture.commit(
@@ -604,7 +616,11 @@ await posixTest("a failed pull request creation fails the proposal", (t) => {
 
 await posixTest("a workflow-only push refreshes an existing proposal", (t) => {
   const fixture = createReleaseFixture(t, {
-    manifest: { name: "issue-runner-t3", version: "0.1.0", type: "module" },
+    manifest: {
+      name: "issue-runner-agent-t3",
+      version: "0.1.0",
+      type: "module",
+    },
     files: { "dist/cli.js": "export {};\n" },
   });
   const before = fixture.commit("README.md", "# T3\n", "docs: describe T3");
@@ -633,7 +649,11 @@ await posixTest("a workflow-only push refreshes an existing proposal", (t) => {
 
 await posixTest("refresh preserves a higher version selected on main", (t) => {
   const fixture = createReleaseFixture(t, {
-    manifest: { name: "issue-runner-t3", version: "0.1.0", type: "module" },
+    manifest: {
+      name: "issue-runner-agent-t3",
+      version: "0.1.0",
+      type: "module",
+    },
   });
   const before = fixture.commit("README.md", "# T3\n", "docs: describe T3");
   assert.equal(
@@ -643,7 +663,7 @@ await posixTest("refresh preserves a higher version selected on main", (t) => {
   fixture.git("checkout", "main");
   const bump = fixture.commit(
     "package.json",
-    '{"name":"issue-runner-t3","version":"1.0.0","type":"module"}\n',
+    '{"name":"issue-runner-agent-t3","version":"1.0.0","type":"module"}\n',
     "chore: select major release",
   );
   const result = fixture.run("auto-release-pr", { PUSH_BEFORE: bump });
@@ -659,7 +679,11 @@ await posixTest(
   "a same-repository release merge with documentation changes does not propose again",
   (t) => {
     const fixture = createReleaseFixture(t, {
-      manifest: { name: "issue-runner-t3", version: "0.1.0", type: "module" },
+      manifest: {
+        name: "issue-runner-agent-t3",
+        version: "0.1.0",
+        type: "module",
+      },
     });
     fixture.propose("0.1.1");
     fixture.git("checkout", "auto-release");
@@ -732,7 +756,11 @@ await posixTest(
   "refresh selects the owned PR even when a fork appears on an earlier page",
   (t) => {
     const fixture = createReleaseFixture(t, {
-      manifest: { name: "issue-runner-t3", version: "0.1.0", type: "module" },
+      manifest: {
+        name: "issue-runner-agent-t3",
+        version: "0.1.0",
+        type: "module",
+      },
     });
     fixture.propose("1.0.0");
     const fork = releasePullRequest(29, {

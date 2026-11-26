@@ -288,13 +288,14 @@ await test("release proposals use a repository-scoped App token and separate con
   assert.ok(job.steps.every((step) => step.if === undefined));
 });
 
-await test("the T3 manifest preserves its CLI and skill package identity", () => {
+await test("the renamed T3 package preserves its CLI and Skill identity", () => {
   const manifest = JSON.parse(
     readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
   ) as Record<string, unknown>;
-  assert.equal(manifest.name, "issue-runner-t3");
+  assert.equal(manifest.name, "issue-runner-agent-t3");
   assert.equal(manifest.packageManager, "npm@11.6.2");
   assert.equal(manifest.license, "MIT");
+  assert.equal(manifest.exports, "./dist/enhancement.js");
   assert.deepEqual(manifest.bin, { "issue-runner-t3": "dist/cli.js" });
   assert.deepEqual(manifest.files, ["dist", "skills/issue-runner-t3"]);
   assert.deepEqual(manifest.repository, {
@@ -319,5 +320,4 @@ await test("the T3 manifest preserves its CLI and skill package identity", () =>
     "ai-agents",
     "coding-agent",
   ]);
-  assert.equal(manifest.exports, undefined);
 });

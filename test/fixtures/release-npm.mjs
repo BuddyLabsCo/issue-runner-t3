@@ -37,7 +37,7 @@ if (args[0] === "view") {
   const separator = spec.lastIndexOf("@");
   const name = separator > 0 ? spec.slice(0, separator) : spec;
   const version = separator > 0 ? spec.slice(separator + 1) : null;
-  if (name !== "issue-runner-t3") {
+  if (name !== "issue-runner-agent-t3") {
     console.error(
       "npm error code E404\nnpm error 404 Not Found - GET " +
         "https://registry.npmjs.org/" +
@@ -62,7 +62,7 @@ if (args[0] === "view") {
     if (!published) {
       console.error(
         "npm error code E404\nnpm error 404 Not Found - GET " +
-          "https://registry.npmjs.org/issue-runner-t3/" +
+          "https://registry.npmjs.org/issue-runner-agent-t3/" +
           version,
       );
       process.exit(1);
@@ -102,7 +102,7 @@ if (args[0] === "publish") {
   // while after a successful upload; only the exit status is authoritative.
   if (!state.staleLatest) state.latest = version;
   save();
-  console.log("+ issue-runner-t3@" + version);
+  console.log("+ issue-runner-agent-t3@" + version);
   process.exit(0);
 }
 process.exit(90);

@@ -9,7 +9,7 @@ export const releaseRepository = "BuddyLabsCo/issue-runner-t3";
 
 export const readyPackage = {
   manifest: {
-    name: "issue-runner-t3",
+    name: "issue-runner-agent-t3",
     repository: {
       type: "git",
       url: "git+https://github.com/BuddyLabsCo/issue-runner-t3.git",
@@ -17,6 +17,7 @@ export const readyPackage = {
     version: "0.1.0",
     description: "Issue Runner for T3 Code",
     type: "module",
+    exports: "./dist/enhancement.js",
     bin: { "issue-runner-t3": "dist/cli.js" },
     dependencies: { "issue-runner-core": "0.1.1" },
     keywords: [
@@ -36,6 +37,8 @@ export const readyPackage = {
   },
   files: {
     "dist/cli.js": 'console.log("issue-runner-t3 0.1.1 (core 0.1.1)");\n',
+    "dist/enhancement.js":
+      "export const contractVersion = 3; export async function createEnhancement() {}\n",
     "dist/authorization.js": "export {};\n",
     "dist/credentials.js": "export {};\n",
     "dist/oauth.js": "export {};\n",

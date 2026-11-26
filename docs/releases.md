@@ -22,7 +22,7 @@ package's [Trusted Publisher](https://docs.npmjs.com/trusted-publishers/):
 
 | Field | Value |
 | --- | --- |
-| Package | `issue-runner-t3` |
+| Package | `issue-runner-agent-t3` |
 | Organization/user | `BuddyLabsCo` |
 | Repository | `issue-runner-t3` |
 | Workflow filename | `publish-release.yml` |
@@ -55,7 +55,9 @@ the validated archive with public access and the `latest` dist-tag, then creates
 immutable `v<version>` and the matching GitHub Release. The proposal and publication
 workflows use separate, non-cancelling concurrency groups.
 
-## First public release
+## First public release under the renamed package
+
+The npm package name is `issue-runner-agent-t3`; the executable and repository retain their names. Keep the existing version sequence and tags. Verify the new name is available before the first publication.
 
 When npm returns HTTP 404 for the package, the publication script stops before
 publishing. The workflow retains `verified-t3-release` for 90 days, including the
@@ -71,7 +73,7 @@ identity.
    node --input-type=module -e '
    import { readFileSync } from "node:fs";
    import { createHash } from "node:crypto";
-   const file = "issue-runner-t3-0.1.0.tgz";
+   const file = "issue-runner-agent-t3-0.1.3.tgz";
    const handoff = JSON.parse(readFileSync(file + ".json", "utf8"));
    const integrity = "sha512-" +
      createHash("sha512").update(readFileSync(file)).digest("base64");
@@ -85,10 +87,11 @@ identity.
 
    ```bash
    npm login
-   npm publish ./issue-runner-t3-0.1.0.tgz --access public --tag latest
+   npm publish ./issue-runner-agent-t3-0.1.3.tgz --access public --tag latest
    ```
 
-4. Rerun the original publication workflow. It compares the candidate with npm's
+4. Install the verified package in an isolated global prefix and check the CLI and Core Enhancement discovery. The maintainer handles legacy registry retirement manually, after verifying the renamed package.
+5. Rerun the original publication workflow. It compares the candidate with npm's
    published integrity and `latest`, then creates the tag and GitHub Release.
 
 Do not rebuild the manual bootstrap archive or publish a placeholder. A registry

@@ -16,7 +16,8 @@ import {
   rename,
   symlink,
 } from "node:fs/promises";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, join } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import { parse, stringify } from "yaml";
@@ -34,7 +35,8 @@ function windowsPowerShellEnv(overrides) {
 }
 
 before(async () => {
-  root = await mkdtemp(resolve(".test-"));
+  // Keep Node self-reference resolution out of the disposable global prefix.
+  root = await mkdtemp(join(tmpdir(), "issue-runner-t3-test-"));
   // npm 11 exports global allow-scripts settings to lifecycle children, but scoped installs reject that flag.
   const env = { ...process.env };
   for (const key of Object.keys(env))
@@ -54,6 +56,7 @@ before(async () => {
   const [pack] = JSON.parse(
     npm(["pack", "--ignore-scripts", "--json", "--pack-destination", root]),
   );
+  assert.equal(pack.filename, `issue-runner-agent-t3-${pack.version}.tgz`);
   npm([
     "install",
     "--global",
@@ -71,7 +74,7 @@ before(async () => {
     "install",
     ...(process.platform === "win32" ? [] : ["lib"]),
     "node_modules",
-    "issue-runner-t3",
+    "issue-runner-agent-t3",
   );
   bin =
     process.platform === "win32"
@@ -159,6 +162,8 @@ test("installed CLI offers help and version without credentials", async () => {
   const manifest = JSON.parse(
     await readFile(join(packageRoot, "package.json"), "utf8"),
   );
+  assert.equal(manifest.name, "issue-runner-agent-t3");
+  assert.deepEqual(manifest.bin, { "issue-runner-t3": "dist/cli.js" });
   assert.equal(
     version.output.trim(),
     `issue-runner-t3 ${manifest.version} (core ${manifest.dependencies["issue-runner-core"]})`,
@@ -343,6 +348,8 @@ async function substitute(
       }
       assert.equal(rpc.method, "tools/call");
       if (rpc.params.name !== "t3_project_list") {
+        if (rpc.params.name === "t3_thread_send")
+          assert.equal(rpc.params.arguments.mode, "queue");
         const payload = await taskTool(
           rpc.params.name,
           rpc.params.arguments,
@@ -395,6 +402,67 @@ const approve = async (url) => {
   const response = await fetch(url);
   assert.equal(response.status, 200);
 };
+
+test("packed Enhancement binds fresh and resumed Tabs independently", async () => {
+  const sent = new Map();
+  const reads = [];
+  const server = await substitute((name, args) => {
+    if (name === "t3_thread_read") {
+      reads.push(args.threadId);
+      return {
+        thread: {
+          threadId: args.threadId,
+          projectId: "project",
+          worktreePath: launch,
+          activeRunId: null,
+          status: "completed",
+          archived: false,
+          title: "resumed",
+        },
+      };
+    }
+    if (name === "t3_queue") return { items: [], nextCursor: null };
+    if (name === "t3_thread_launch")
+      return { threadId: "fresh-thread", projectId: "project", runId: null };
+    if (name === "t3_thread_send") {
+      sent.set(args.threadId, args.message);
+      return {
+        threadId: args.threadId,
+        runId: randomUUID(),
+        messageId: randomUUID(),
+      };
+    }
+    assert.fail(`Unexpected T3 tool ${name}`);
+  });
+  try {
+    assert.equal(
+      (await cli(["auth", "login", server.endpoint], { approve })).code,
+      0,
+    );
+    const entry = join(
+      root,
+      "install",
+      ...(process.platform === "win32" ? [] : ["lib"]),
+      "enhancement-check.mjs",
+    );
+    await copyFile(
+      new URL("./fixtures/enhancement-check.mjs", import.meta.url),
+      entry,
+    );
+    const result = await cli([server.endpoint], { entry });
+    assert.equal(result.code, 0, result.output);
+    assert.deepEqual(reads, ["launcher", "saved-thread", "saved-thread"]);
+    assert.deepEqual(
+      sent,
+      new Map([
+        ["fresh-thread", "Assignment"],
+        ["saved-thread", "continue"],
+      ]),
+    );
+  } finally {
+    await server.close();
+  }
+});
 
 test("adapter acknowledges delivery without a handoff and rejects malformed archival status", async () => {
   const history = [];
@@ -766,7 +834,9 @@ async function coreFixture() {
         conflictRepair: agent,
       },
     });
-    config.terminalPlugins.agentStartDelay = 0;
+    // A fallback to Core's base startup delay must not pass these tests.
+    config.terminalPlugins.agentStartDelay = 60;
+    config.terminalPlugins.enhancements = { retryLimit: 0 };
     await writeFile(configPath, stringify(config));
     await writeFile(join(project, "prompts", "implement.md"), marker);
     await writeFile(
@@ -845,6 +915,14 @@ const scenarios = [
     ],
   },
   {
+    name: "reject invalid send identities",
+    launch: receipt,
+    send: ["wrong-thread", "blank-run", "blank-message"],
+    threads: 1,
+    messages: 1,
+    errors: [retryExhausted, signInWarning],
+  },
+  {
     name: "thread missing after lost send reply",
     launch: receipt,
     send: ["drop", "not_found"],
@@ -902,6 +980,12 @@ for (const scenario of scenarios)
             return undefined;
           case "malformed":
             return {};
+          case "wrong-thread":
+            return { ...receipt, threadId: "another-thread" };
+          case "blank-run":
+            return { ...receipt, runId: " " };
+          case "blank-message":
+            return { ...receipt, messageId: " " };
           case "not_found":
             return { code: "thread_not_found", message: "Thread not found" };
           case "orchestration_error":

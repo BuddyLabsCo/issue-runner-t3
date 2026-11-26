@@ -267,7 +267,7 @@ await posixTest(
 
     assert.match(result.stderr, /is not publication-ready/);
     assert.match(result.stderr, /must not be private/);
-    assert.match(result.stderr, /must name issue-runner-t3/);
+    assert.match(result.stderr, /must name issue-runner-agent-t3/);
     assert.match(result.stderr, /must declare a files allowlist/);
     assert.equal(
       fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
@@ -292,7 +292,7 @@ await posixTest("a tarball from another version is rejected", (t) => {
 
   assert.match(
     result.stderr,
-    /the tarball is issue-runner-t3@0\.1\.0, not issue-runner-t3@0\.1\.1/,
+    /the tarball is issue-runner-agent-t3@0\.1\.0, not issue-runner-agent-t3@0\.1\.1/,
   );
   assert.equal(
     fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
@@ -328,23 +328,75 @@ await posixTest(
   },
 );
 
-await posixTest("a tarball declaring the wrong executable is rejected", (t) => {
-  const fixture = createPublishFixture(t, {
-    manifest: {
-      ...readyPackage.manifest,
-      bin: { "issue-runner-t3": "dist/absent.js" },
+for (const [reason, bin] of [
+  ["name", { "issue-runner-agent-t3": "dist/cli.js" }],
+  ["path", { "issue-runner-t3": "dist/absent.js" }],
+] as const) {
+  await posixTest(
+    `a tarball declaring the wrong executable ${reason} is rejected`,
+    (t) => {
+      const fixture = createPublishFixture(t, {
+        manifest: { ...readyPackage.manifest, bin },
+        files: readyPackage.files,
+      });
+      const { merge, tarball } = mergedRelease(fixture);
+
+      const result = fixture.runExpectingFailure(
+        "publish-release",
+        publishEnvironment(merge, tarball),
+      );
+
+      assert.match(
+        result.stderr,
+        /must declare the issue-runner-t3 executable/,
+      );
     },
-    files: readyPackage.files,
-  });
-  const { merge, tarball } = mergedRelease(fixture);
-
-  const result = fixture.runExpectingFailure(
-    "publish-release",
-    publishEnvironment(merge, tarball),
   );
+}
 
-  assert.match(result.stderr, /must declare the issue-runner-t3 executable/);
-});
+await posixTest(
+  "a tarball named after the legacy executable is rejected",
+  (t) => {
+    const fixture = createPublishFixture(t, {
+      ...readyPackage,
+      manifest: { ...readyPackage.manifest, name: "issue-runner-t3" },
+    });
+    const { merge, tarball } = mergedRelease(fixture);
+    const result = fixture.runExpectingFailure(
+      "publish-release",
+      publishEnvironment(merge, tarball),
+    );
+    assert.match(result.stderr, /must name issue-runner-agent-t3/);
+    assert.doesNotMatch(
+      result.stderr,
+      /must declare the issue-runner-t3 executable/,
+    );
+    assert.equal(
+      fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
+      0,
+    );
+  },
+);
+
+await posixTest(
+  "a tarball without its root Enhancement export is rejected",
+  (t) => {
+    const fixture = createPublishFixture(t, {
+      ...readyPackage,
+      manifest: { ...readyPackage.manifest, exports: undefined },
+    });
+    const { merge, tarball } = mergedRelease(fixture);
+    const result = fixture.runExpectingFailure(
+      "publish-release",
+      publishEnvironment(merge, tarball),
+    );
+    assert.match(result.stderr, /must export the bundled T3 Enhancement/);
+    assert.equal(
+      fixture.calls("npm").filter(({ args }) => args[0] === "publish").length,
+      0,
+    );
+  },
+);
 
 // Regression: an existing tag is the version ledger. A conflicting tag target
 // must stop the release before the registry is touched.
@@ -438,6 +490,7 @@ await posixTest(
 for (const missing of [
   "dist/cli.js",
   "dist/terminal.js",
+  "dist/enhancement.js",
   "skills/issue-runner-t3/SKILL.md",
   "skills/issue-runner-t3/scripts/launch-terminal.mjs",
 ]) {

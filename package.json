@@ -1,9 +1,10 @@
 {
-  "name": "issue-runner-t3",
+  "name": "issue-runner-agent-t3",
   "version": "0.1.2",
   "description": "Issue Runner for T3 Code",
   "type": "module",
   "license": "MIT",
+  "exports": "./dist/enhancement.js",
   "bin": {
     "issue-runner-t3": "dist/cli.js"
   },

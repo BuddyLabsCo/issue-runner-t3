@@ -269,7 +269,10 @@ await posixTest(
       publishEnvironment(merge, tarball),
     );
 
-    assert.match(result.stderr, /npm publish issue-runner-t3@0\.1\.1 failed/);
+    assert.match(
+      result.stderr,
+      /npm publish issue-runner-agent-t3@0\.1\.1 failed/,
+    );
     assert.match(result.stderr, /registry rejected the upload/);
     assert.match(result.stderr, /No publication stages completed\./);
     assert.equal(fixture.remoteTag("v0.1.1"), "");
