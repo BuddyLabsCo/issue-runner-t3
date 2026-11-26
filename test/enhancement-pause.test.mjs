@@ -515,9 +515,9 @@ test("a read begun before expiry cannot authorize recovery after expiry", async 
   assert.equal(f.sends.length, 1);
 });
 
-test("only eligible native status starts a delay; a new Run or ineligible status restarts it", async (t) => {
+test("only completed and interrupted native statuses qualify for recovery", async (t) => {
   const time = clock(t);
-  const f = await fixture(t, { handoffRecoveryDelaySeconds: 8 });
+  const f = await fixture(t, { handoffRecoveryDelaySeconds: 10 });
   await f.assign("first");
   for (const status of [
     "idle",
@@ -530,24 +530,55 @@ test("only eligible native status starts a delay; a new Run or ineligible status
     f.set(status, ["one"], []);
     await time.observe(f, 5000);
     await time.observe(f, 5000);
+    await time.observe(f, 5000);
     assert.equal(f.requests.length, 0, status);
   }
+
   f.set("interrupted", ["one"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  f.set("failed", ["one"], []);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 0);
+
+  f.set("interrupted", ["one"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 5000);
+  await until(() => f.sends.length === 2);
+  await f.waitForRequests(1);
+  assert.equal(f.requests.length, 1);
+});
+
+test("a changed Run ID with unchanged eligible status restarts the full recovery delay", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, {
+    retryLimit: 1,
+    handoffRecoveryDelaySeconds: 10,
+  });
+  await f.assign("first");
+  f.set("completed", ["one"], []);
   await time.observe(f, 5000);
   f.set("completed", ["two", "one"], []);
   await time.observe(f, 5000);
   await time.observe(f, 5000);
-  f.set("failed", ["two", "one"], []);
-  await time.observe(f, 3000);
-  assert.equal(f.requests.length, 0);
-  f.set("interrupted", ["two", "one"], []);
+  assert.equal(
+    f.requests.length,
+    0,
+    "The old Run's deadline must not authorize recovery",
+  );
   await time.observe(f, 5000);
-  await time.observe(f, 5000);
-  assert.equal(f.requests.length, 0);
-  await time.observe(f, 3000);
   await until(() => f.sends.length === 2);
   await f.waitForRequests(1);
   assert.equal(f.requests.length, 1);
+  assert.deepEqual(
+    f.sends.map(({ threadId, mode, message }) => [threadId, mode, message]),
+    [
+      ["task", "queue", "first"],
+      ["task", "queue", "continue"],
+    ],
+  );
 });
 
 test("a replacement without a new Run gets a full delay but cannot inherit the preceding marker", async (t) => {

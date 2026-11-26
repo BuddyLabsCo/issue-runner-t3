@@ -43,6 +43,10 @@ In the conversation for the repository you want to work on:
 
 Use `$issue-runner-t3 cleanup` to delete Project files, including saved Run state, while preserving `config.yaml` and `prompts`.
 
+### Missing handoff recovery
+
+Runner requests recovery when an eligible task Thread finishes or is interrupted without producing its expected handoff. By default it waits 120 seconds and allows three attempts per Assignment. See [recovery settings](docs/t3-protocol.md#missing-handoff-recovery) to change the delay or disable recovery without disabling Enhancement Pause.
+
 ### Pause guidance
 
 By default, Runner queues diagnostic advice in the launcher conversation when a terminal confirmation becomes active. The prompt includes the latest 15 lines of Runner output. Choose the confirmation option yourself in the terminal; advice never resolves a pause.
