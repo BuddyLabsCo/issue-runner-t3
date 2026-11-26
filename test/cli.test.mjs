@@ -9,6 +9,7 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   stat,
   writeFile,
   rm,
@@ -16,7 +17,7 @@ import {
   rename,
   symlink,
 } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
@@ -835,6 +836,15 @@ async function gitFixture() {
   return { checkout, worktree, commit };
 }
 
+async function assertWorktreeStrategy(strategy, worktree) {
+  assert.ok(isAbsolute(strategy.worktreePath));
+  // Git and Core may spell the same Windows path differently (e.g. 8.3 names).
+  assert.deepEqual(
+    { ...strategy, worktreePath: await realpath(strategy.worktreePath) },
+    { type: "existing_worktree", worktreePath: await realpath(worktree) },
+  );
+}
+
 async function coreFixture(aliased = false) {
   const { checkout, worktree, commit } = await gitFixture();
   const project = join(launch, "demo");
@@ -1137,10 +1147,10 @@ for (const scenario of scenarios)
             model: "fixture-model",
             options: [{ id: "reasoningEffort", value: "high" }],
           });
-          assert.deepEqual(args.workspaceStrategy, {
-            type: "existing_worktree",
-            worktreePath: (await fixture()).worktree,
-          });
+          await assertWorktreeStrategy(
+            args.workspaceStrategy,
+            (await fixture()).worktree,
+          );
           assert.ok(!("message" in args));
           launched = args;
           if (reply === "reject")
@@ -1370,10 +1380,10 @@ for (const mode of ["recover-handoff", "recover-enter"])
             model: "fixture-model",
             options: [{ id: "reasoningEffort", value: "high" }],
           });
-          assert.deepEqual(args.workspaceStrategy, {
-            type: "existing_worktree",
-            worktreePath: (await fixture()).worktree,
-          });
+          await assertWorktreeStrategy(
+            args.workspaceStrategy,
+            (await fixture()).worktree,
+          );
           assert.ok(!("message" in args));
           launched = args;
           return {
@@ -1802,10 +1812,10 @@ test(
           "Each role must launch exactly once",
         );
         assert.equal(args.projectId, projectId);
-        assert.deepEqual(args.workspaceStrategy, {
-          type: "existing_worktree",
-          worktreePath: (await fixture()).worktree,
-        });
+        await assertWorktreeStrategy(
+          args.workspaceStrategy,
+          (await fixture()).worktree,
+        );
         threads.set(threadId, {
           threadId,
           projectId,
