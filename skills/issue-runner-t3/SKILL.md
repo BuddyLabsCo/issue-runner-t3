@@ -30,7 +30,7 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 1. Check latest `issue-runner-agent-t3`, both global packages, CLI links and Skill against the installed latest bundle if available.
 2. If changes are needed, show version/actions. Require approval and confirmation all Runner processes stopped; do not inspect or terminate them.
 3. Uninstall global legacy `issue-runner-t3` if present; install approved exact version globally if needed, including after legacy removal or broken CLI links. Replace the invoked Skill with the bundled Skill.
-4. Stop on failure, report completed/failed actions, recheck on rerun. No rollback or extra CLI verification. Preserve Projects/credentials.
+4. Stop on failure and report completed/failed actions.
 
 ## `$issue-runner-t3 init`
 
