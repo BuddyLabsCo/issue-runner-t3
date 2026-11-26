@@ -27,13 +27,21 @@ export async function callMcp(
   name: string,
   args: Record<string, unknown>,
   retry?: Retry,
+  signal = retry?.signal,
 ): Promise<Record<string, unknown>> {
   // The saved bearer token defines T3's deduplication scope. Do not reload it between attempts.
   const credential = await requireCredential(endpoint);
   for (let attempt = 0; ; attempt++) {
-    retry?.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     try {
-      const data = await attemptMcp(endpoint, name, args, credential, retry);
+      const data = await attemptMcp(
+        endpoint,
+        name,
+        args,
+        credential,
+        retry,
+        signal,
+      );
       // T3 can report an orchestration error after an accepted command fails projection lookup.
       if (retry && data.code === "orchestration_error")
         throw new UncertainMcpError(`${name}: ${data.message}`);
@@ -44,7 +52,7 @@ export async function callMcp(
         };
       return data;
     } catch (error) {
-      retry?.signal?.throwIfAborted();
+      signal?.throwIfAborted();
       if (!retry) throw error;
       if (!(error instanceof UncertainMcpError)) {
         if (attempt === 0) throw error;
@@ -65,11 +73,10 @@ async function attemptMcp(
   args: Record<string, unknown>,
   credential: Credential,
   retry?: Retry,
+  signal?: AbortSignal,
 ): Promise<Record<string, unknown>> {
   const timeout = AbortSignal.timeout(10_000);
-  const deadline = retry?.signal
-    ? AbortSignal.any([timeout, retry.signal])
-    : timeout;
+  const deadline = signal ? AbortSignal.any([timeout, signal]) : timeout;
   const transport = new StreamableHTTPClientTransport(new URL(endpoint), {
     requestInit: {
       headers: { Authorization: `Bearer ${credential.accessToken}` },
