@@ -835,7 +835,7 @@ async function gitFixture() {
   return { checkout, worktree, commit };
 }
 
-async function coreFixture() {
+async function coreFixture(aliased = false) {
   const { checkout, worktree, commit } = await gitFixture();
   const project = join(launch, "demo");
   const stateFile = join(launch, "fixture.json");
@@ -890,14 +890,17 @@ async function coreFixture() {
       "Review the fixture.",
     );
   }
+  const alias = join(launch, "package-alias");
+  if (aliased) await symlink(packageRoot, alias, "dir");
   const runCli = (control, timeout) =>
     cli(["run", "--project", "demo", "--issue", "42"], {
+      entry: aliased ? join(alias, "dist", "cli.js") : undefined,
       log,
       control,
       timeout: process.platform === "win32" ? 90_000 : timeout,
       env: {
         T3CODE_THREAD_ID: "launcher-thread",
-        NODE_OPTIONS: `--import=${new URL("./fixtures/core-command-preload.mjs", import.meta.url).href}`,
+        NODE_OPTIONS: `--import=${new URL("./fixtures/core-command-preload.mjs", import.meta.url).href}${aliased ? " --preserve-symlinks --preserve-symlinks-main" : ""}`,
         FIXTURE_GH_ENTRY: dest,
         FIXTURE_STATE: stateFile,
       },
@@ -913,6 +916,14 @@ const retryExhausted = /Retry budget exhausted after 3 attempts/;
 const signInWarning = /signing in again changes the deduplication scope/;
 const scenarios = [
   { name: "normal", launch: receipt, send: receipt, threads: 1, messages: 1 },
+  {
+    name: "aliased CLI path",
+    launch: receipt,
+    send: receipt,
+    threads: 1,
+    messages: 1,
+    aliased: true,
+  },
   {
     name: "reject launch",
     launch: ["reject"],
@@ -1004,7 +1015,7 @@ for (const scenario of scenarios)
     { skip: process.platform === "win32" && scenario.name !== "normal" },
     async () => {
       const { log, fixture, checkpoint, initialize, runCli } =
-        await coreFixture();
+        await coreFixture(scenario.aliased);
       const launcher = "launcher-thread";
       const id = "native-task-thread";
       const projectId = "launcher-project";
