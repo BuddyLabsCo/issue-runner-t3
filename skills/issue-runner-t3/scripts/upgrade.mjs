@@ -7,8 +7,9 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
 } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const replacement = "issue-runner-agent-t3";
@@ -41,6 +42,29 @@ function installedVersion(root, name) {
   if (manifest.name !== name || !validVersion(manifest.version))
     throw new Error(`Invalid installed package manifest: ${name}`);
   return manifest.version;
+}
+
+function hasExecutable(prefix, root) {
+  const target = join(root, replacement, "dist", "cli.js");
+  try {
+    if (!statSync(target).isFile()) return false;
+    if (process.platform === "win32") {
+      const shimTarget = relative(prefix, target).replaceAll("\\", "/");
+      return ["", ".cmd", ".ps1"].every((extension) =>
+        readFileSync(join(prefix, legacy + extension), "utf8")
+          .replaceAll("\\", "/")
+          .includes(shimTarget),
+      );
+    }
+    const bin = join(prefix, "bin", legacy);
+    return (
+      realpathSync(bin) === realpathSync(target) &&
+      (statSync(bin).mode & 0o111) !== 0
+    );
+  } catch (error) {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 function snapshot(directory, prefix = "") {
@@ -82,17 +106,34 @@ function inspect() {
   if (!validVersion(latest)) throw new Error("Invalid latest npm version.");
   const globalRoot = npm("root", "--global");
   if (!isAbsolute(globalRoot)) throw new Error("Invalid global npm root.");
+  const globalPrefix = npm("prefix", "--global");
+  if (!isAbsolute(globalPrefix)) throw new Error("Invalid global npm prefix.");
   const installed = installedVersion(globalRoot, replacement);
   const legacyVersion = installedVersion(globalRoot, legacy);
   const current = JSON.stringify(snapshot(skill));
-  const install = installed !== latest;
-  const sync =
-    install || current !== JSON.stringify(bundleSnapshot(globalRoot));
+  const staleSkill =
+    installed !== latest ||
+    current !== JSON.stringify(bundleSnapshot(globalRoot));
+  // Both packages own the same bin name; uninstall can remove the replacement link.
+  const install =
+    installed !== latest ||
+    Boolean(legacyVersion) ||
+    !hasExecutable(globalPrefix, globalRoot);
+  const sync = install || staleSkill;
   const actions = [];
   if (legacyVersion) actions.push(`Uninstall ${legacy}@${legacyVersion}`);
   if (install) actions.push(`Install ${replacement}@${latest}`);
   if (sync) actions.push(`Synchronize Skill at ${skill}`);
-  const plan = { latest, globalRoot, installed, legacyVersion, skill, actions };
+  const plan = {
+    latest,
+    globalRoot,
+    globalPrefix,
+    installed,
+    legacyVersion,
+    skill,
+    install,
+    actions,
+  };
   return { ...plan, confirmationId: digest(JSON.stringify(plan)) };
 }
 
@@ -149,9 +190,14 @@ function main() {
   };
   if (plan.legacyVersion)
     perform(plan.actions.shift(), () => npm("uninstall", "--global", legacy));
-  if (plan.installed !== plan.latest)
+  if (plan.install)
     perform(plan.actions.shift(), () =>
-      npm("install", "--global", `${replacement}@${plan.latest}`),
+      npm(
+        "install",
+        "--global",
+        `${replacement}@${plan.latest}`,
+        "--bin-links=true",
+      ),
     );
   if (plan.actions.length)
     perform(plan.actions.shift(), () =>

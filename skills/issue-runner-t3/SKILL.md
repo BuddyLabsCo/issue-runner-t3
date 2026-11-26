@@ -45,7 +45,7 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 
 5. Report the completed and failed actions. On failure, stop and offer to rerun `upgrade` from the check; do not roll back. On success, report completion without another CLI verification.
 
-The helper uses the current npm installation, removes the legacy global package before installing the exact selected version if needed, and synchronizes the full bundled Skill into this invoked Skill directory only. It does not change other Skills, Project files, or credentials.
+The helper uses the current npm installation and removes the legacy package first. It installs the exact selected version if needed, including reinstalls to restore CLI links after legacy removal or when links are missing. It synchronizes the full bundled Skill into this invoked Skill directory only. It does not change other Skills, Project files, or credentials.
 
 ## `$issue-runner-t3 init`
 

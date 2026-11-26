@@ -203,19 +203,15 @@ test("installed Runner includes its discoverable companion skill", async () => {
   );
   const [, metadata] = source.split("---");
   assert.equal(parse(metadata).name, "issue-runner-t3");
-  assert.ok(
-    (
-      await stat(
-        join(
-          packageRoot,
-          "skills",
-          "issue-runner-t3",
-          "scripts",
-          "launch-terminal.mjs",
-        ),
-      )
-    ).isFile(),
-  );
+  for (const helper of ["launch-terminal.mjs", "upgrade.mjs"]) {
+    assert.ok(
+      (
+        await stat(
+          join(packageRoot, "skills", "issue-runner-t3", "scripts", helper),
+        )
+      ).isFile(),
+    );
+  }
 });
 
 test("run refuses missing or blank launcher thread before authorization", async () => {

@@ -51,6 +51,7 @@ export const readyPackage = {
     "prompts/runner-pause-guidance.md": "Fixture guidance <output>\n",
     "skills/issue-runner-t3/SKILL.md": "# T3 companion skill\n",
     "skills/issue-runner-t3/scripts/launch-terminal.mjs": "export {};\n",
+    "skills/issue-runner-t3/scripts/upgrade.mjs": "export {};\n",
     "README.md": "# issue-runner-t3\n",
     "CHANGELOG.md": "# Changelog\n",
   },

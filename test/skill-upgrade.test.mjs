@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -13,6 +14,7 @@ import {
 import { join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { linkRunner, runnerBins } from "./fixtures/upgrade-bin.mjs";
 
 const packageName = "issue-runner-agent-t3";
 const legacyName = "issue-runner-t3";
@@ -22,10 +24,17 @@ const source = fileURLToPath(
 );
 const substitute = new URL("./fixtures/upgrade-npm.mjs", import.meta.url).href;
 
-function fixture(t, { replacement = latest, legacy = false } = {}) {
+function fixture(
+  t,
+  { replacement = latest, legacy = false, platform = process.platform } = {},
+) {
   const root = mkdtempSync(resolve(".test-upgrade-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const globalRoot = join(root, "global", "node_modules");
+  const prefix = join(root, "global");
+  const globalRoot =
+    platform === "win32"
+      ? join(prefix, "node_modules")
+      : join(prefix, "lib", "node_modules");
   const bundle = join(root, "published-skill");
   const invoked = join(root, "provider-one", legacyName);
   const other = join(root, "provider-two", legacyName);
@@ -47,9 +56,10 @@ function fixture(t, { replacement = latest, legacy = false } = {}) {
       JSON.stringify({ name, version }),
     );
     cpSync(bundle, join(path, "skills", legacyName), { recursive: true });
+    linkRunner(prefix, globalRoot, name, platform);
   };
-  if (replacement) install(packageName, replacement);
   if (legacy) install(legacyName, "1.0.0");
+  if (replacement) install(packageName, replacement);
   const run = (args, failure = "") =>
     spawnSync(
       process.execPath,
@@ -65,6 +75,8 @@ function fixture(t, { replacement = latest, legacy = false } = {}) {
         env: {
           ...process.env,
           UPGRADE_ROOT: globalRoot,
+          UPGRADE_PREFIX: prefix,
+          UPGRADE_PLATFORM: platform,
           UPGRADE_BUNDLE: bundle,
           UPGRADE_LOG: log,
           UPGRADE_LATEST: latest,
@@ -85,6 +97,8 @@ function fixture(t, { replacement = latest, legacy = false } = {}) {
       .map(JSON.parse)
       .filter(([action]) => ["install", "uninstall"].includes(action));
   return {
+    prefix,
+    platform,
     globalRoot,
     bundle,
     invoked,
@@ -129,7 +143,7 @@ test("legacy-only migration requires both confirmations and installs the exact s
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(f.mutations(), [
     ["uninstall", "--global", legacyName],
-    ["install", "--global", `${packageName}@${latest}`],
+    ["install", "--global", `${packageName}@${latest}`, "--bin-links=true"],
   ]);
   assertRepaired(f);
 });
@@ -163,7 +177,19 @@ function contents(path) {
   );
 }
 
+function assertExecutable(f) {
+  const target = join(f.globalRoot, packageName, "dist", "cli.js");
+  for (const bin of runnerBins(f.prefix, f.platform)) {
+    if (f.platform === "win32") {
+      assert.equal(readFileSync(bin, "utf8"), relative(f.prefix, target));
+    } else {
+      assert.equal(realpathSync(bin), realpathSync(target));
+    }
+  }
+}
+
 function assertRepaired(f) {
+  assertExecutable(f);
   assert.deepEqual(contents(f.invoked), contents(f.bundle));
   assert.equal(
     readFileSync(join(f.other, "SKILL.md"), "utf8"),
@@ -222,12 +248,15 @@ test("a changed helper alone requires Skill repair", (t) => {
   assert.deepEqual(contents(f.invoked), contents(f.bundle));
 });
 
-test("both packages present: remove the legacy package and repair the invoked Skill only", (t) => {
+test("both packages present: remove the legacy package and restore the shared executable", (t) => {
   const f = fixture(t, { legacy: true });
   makeStale(f);
   const result = apply(f, f.check());
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(f.mutations(), [["uninstall", "--global", legacyName]]);
+  assert.deepEqual(f.mutations(), [
+    ["uninstall", "--global", legacyName],
+    ["install", "--global", `${packageName}@${latest}`, "--bin-links=true"],
+  ]);
   assertRepaired(f);
 });
 
@@ -237,7 +266,7 @@ test("an outdated replacement is updated and its full Skill bundle is copied", (
   const result = apply(f, f.check());
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(f.mutations(), [
-    ["install", "--global", `${packageName}@${latest}`],
+    ["install", "--global", `${packageName}@${latest}`, "--bin-links=true"],
   ]);
   assertRepaired(f);
 });
@@ -271,8 +300,30 @@ for (const failure of ["uninstall", "install"]) {
     assert.equal(retry.status, 0, retry.stderr);
     assert.deepEqual(f.mutations(), [
       ["uninstall", "--global", legacyName],
-      ["install", "--global", `${packageName}@${latest}`],
+      ["install", "--global", `${packageName}@${latest}`, "--bin-links=true"],
     ]);
     assertRepaired(f);
+  });
+}
+
+for (const platform of new Set([process.platform, "win32"])) {
+  test(`rerun restores the missing ${platform} executable after legacy removal with a current package`, (t) => {
+    const f = fixture(t, { legacy: true, platform });
+    const result = apply(f, f.check(), "uninstall");
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Failed: Uninstall/);
+    assert.ok(runnerBins(f.prefix, platform).every((bin) => !existsSync(bin)));
+    const plan = f.check();
+    assert.equal(plan.installed, latest);
+    assert.equal(plan.legacyVersion, null);
+    assert.ok(plan.actions.includes(`Install ${packageName}@${latest}`));
+    const retry = apply(f, plan);
+    assert.equal(retry.status, 0, retry.stderr);
+    assert.deepEqual(f.mutations(), [
+      ["uninstall", "--global", legacyName],
+      ["install", "--global", `${packageName}@${latest}`, "--bin-links=true"],
+    ]);
+    assertExecutable(f);
+    assert.deepEqual(f.check().actions, []);
   });
 }
