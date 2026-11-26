@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import fs, { mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import fs, { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -691,15 +691,18 @@ test("a file-access error at expiry invalidates the delay until absence is confi
   const file = await f.assign("first");
   f.set("completed", ["run"], []);
   await time.observe(f, 5000);
-  try {
-    await symlink(file, file, "file");
-  } catch (error) {
-    if (process.platform === "win32" && error.code === "EPERM") {
-      t.skip("Windows symlink creation requires developer mode or privilege");
-      return;
-    }
-    throw error;
-  }
+  let inaccessible = true;
+  const originalAccess = fs.access;
+  const access = t.mock.method(fs, "access", async (path, ...args) => {
+    if (path === file && inaccessible)
+      throw Object.assign(new Error("Access denied"), { code: "EACCES" });
+    return originalAccess(path, ...args);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    access.mock.restore();
+    syncBuiltinESMExports();
+  });
   await time.observe(f, 5000);
   assert.equal(f.requests.length, 0);
   assert.equal(time.tick(9999), false);
@@ -709,7 +712,7 @@ test("a file-access error at expiry invalidates the delay until absence is confi
     errors.mock.calls.map(({ arguments: args }) => args[0]),
     ["Missing handoff recovery check failed; retrying in 10 seconds."],
   );
-  await unlink(file);
+  inaccessible = false;
   await time.observe(f, 10000);
   assert.equal(f.requests.length, 0);
   await time.observe(f, 5000);
