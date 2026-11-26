@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.3
+
+- feat: [issue-70] upgrade Runner package and repair invoked Skill (#77)
+- fix: [issue-68] resume handoff monitoring after observation loss (#76)
+- feat: [issue-67] recover missing Assignment handoffs (#75)
+- feat: [issue-66] pause Assignments for human action (#74)
+- feat: [issue-65] discover bundled T3 Enhancement (#72)
+- feat: [issue-69] queue diagnostic advice for active Runner confirmations (#71)
+
 ## 0.1.2
 
 - chore: [issue-42] update issue-runner-core to 1.0.13 (#43)
