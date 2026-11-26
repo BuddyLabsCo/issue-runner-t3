@@ -45,7 +45,11 @@ Use `$issue-runner-t3 cleanup` to delete Project files, including saved Run stat
 
 ### Missing handoff recovery
 
-Runner requests recovery when an eligible task Thread finishes or is interrupted without producing its expected handoff. By default it waits 120 seconds and allows three attempts per Assignment. See [recovery settings](docs/t3-protocol.md#missing-handoff-recovery) to change the delay or disable recovery without disabling Enhancement Pause.
+Runner requests recovery when an eligible task Thread finishes or is interrupted without producing its expected handoff. Configure `terminalPlugins.enhancements` in the Project’s `config.yaml`:
+
+- `retryLimit`: nonnegative integer, default `3`; `0` disables recovery but keeps Enhancement Pause.
+- `handoffRecoveryDelaySeconds`: finite nonnegative seconds, default `120`.
+- `logLevel`: `error` (default) or `info` for timer events.
 
 ### Pause guidance
 
