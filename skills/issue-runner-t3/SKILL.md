@@ -27,10 +27,10 @@ If a required parameter is missing, ambiguous, or invalid, resolve it before `in
 
 ## `$issue-runner-t3 upgrade`
 
-1. Check latest `issue-runner-agent-t3`, both global packages, CLI links and invoked Skill against the installed latest bundle if available. Stop on error or no changes.
-2. Show version/actions; require approval and confirmation all Runner processes stopped. No process inspection or termination.
-3. Uninstall global legacy `issue-runner-t3` if present; install the approved exact replacement if needed (including broken CLI links or legacy removal). Mirror the full bundle into the invoked Skill only.
-4. Stop on failure, report completed/failed actions, recheck on rerun. No rollback or CLI verification. Preserve Projects and credentials.
+1. Check latest `issue-runner-agent-t3`, both global packages, CLI links and Skill against the installed latest bundle if available.
+2. If changes are needed, show version/actions. Require approval and confirmation all Runner processes stopped; do not inspect or terminate them.
+3. Uninstall global legacy `issue-runner-t3` if present; install approved exact version globally if needed, including after legacy removal or broken CLI links. Replace the invoked Skill with the bundled Skill.
+4. Stop on failure, report completed/failed actions, recheck on rerun. No rollback or extra CLI verification. Preserve Projects/credentials.
 
 ## `$issue-runner-t3 init`
 
