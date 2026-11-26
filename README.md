@@ -7,7 +7,7 @@ Deliver GitHub Issues from native T3 Code task threads using [Issue Runner Core]
 Meet the [Core prerequisites](https://github.com/BuddyLabsCo/issue-runner-core/blob/main/README.md#prerequisites), replacing the terminal multiplexer and Agent CLI requirements with these T3-specific checks:
 
 - **T3 Code:** the `t3` CLI on `PATH` and at least one available, authenticated provider with advertised models (`orchestrator_capabilities`, `canRunChildTask: true`). Configure providers in T3 settings.
-- **Runner:** install with `npm install --global issue-runner-agent-t3`; check `issue-runner-t3 --version`. If you installed the legacy npm package, run `npm uninstall --global issue-runner-t3` first. The executable name stays the same.
+- **Runner:** install with `npm install --global issue-runner-agent-t3`; check `issue-runner-t3 --version`.
 
 ### Install the companion skill
 
