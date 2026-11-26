@@ -44,12 +44,15 @@ Core owns recovery wording, serialized input, stale-Assignment rejection and han
 
 The Enhancement resets the budget when it observes the handoff or the Assignment changes, not when a new Run starts or the operator presses Enter. Exhaustion produces one notice and stops recovery requests until the budget resets. Monitoring continues without an Operator Pause. A genuine Core rejection disables automatic recovery for the Enhancement instance without replay.
 
+After observation loss, the Enhancement discards stale observations and retries the same Thread every ten seconds. A fresh eligible observation starts a full delay. Reconnection preserves the Assignment, attempts, pause and processed markers. Stop or Runner cancellation ends monitoring; an in-flight Core request can settle without starting another request.
+
 Configure the recovery settings under `terminalPlugins.enhancements` in the Project's `config.yaml`:
 
 | Setting | Default | Valid values |
 | --- | --- | --- |
 | `retryLimit` | `3` | Nonnegative integer; `0` disables automatic recovery but keeps Enhancement Pause active |
 | `handoffRecoveryDelaySeconds` | `120` | Finite nonnegative seconds |
+| `logLevel` | `error` | `error` reports attempts, exhaustion and failures; `info` also reports recovery timer scheduling, cancellation and expiry |
 
 ### Skill launcher
 

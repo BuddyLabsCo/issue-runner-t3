@@ -16,6 +16,8 @@ export const contractVersion = enhancementContractVersion;
 type Assignment = Parameters<Enhancement["onAssignment"]>[0];
 type RecordData = Record<string, unknown>;
 
+class HandoffCheckError extends Error {}
+
 function record(value: unknown): RecordData {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Invalid T3 observation.");
@@ -33,7 +35,7 @@ async function handoffAbsent(path: string) {
       )
     )
       return true;
-    throw error;
+    throw new HandoffCheckError("Cannot check handoff.", { cause: error });
   }
 }
 
@@ -50,6 +52,8 @@ export const createEnhancement: EnhancementModule["createEnhancement"] = async (
     settings.handoffRecoveryDelaySeconds === undefined
       ? 120
       : settings.handoffRecoveryDelaySeconds;
+  const logLevel =
+    settings.logLevel === undefined ? "error" : settings.logLevel;
   if (
     typeof retryLimit !== "number" ||
     !Number.isInteger(retryLimit) ||
@@ -60,10 +64,12 @@ export const createEnhancement: EnhancementModule["createEnhancement"] = async (
     throw new Error(
       "handoffRecoveryDelaySeconds must be finite nonnegative seconds.",
     );
+  if (logLevel !== "error" && logLevel !== "info")
+    throw new Error("logLevel must be error or info.");
   return new T3Enhancement(
     io,
     context,
-    new MissingHandoffRecovery(requestRecovery, retryLimit, delay),
+    new MissingHandoffRecovery(requestRecovery, retryLimit, delay, logLevel),
   );
 };
 
@@ -78,9 +84,12 @@ class MissingHandoffRecovery {
     private readonly requestRecovery: RequestRecovery,
     private readonly retryLimit: number,
     private readonly delaySeconds: number,
+    private readonly logLevel: "error" | "info",
   ) {}
 
   cancel() {
+    if (this.pending && this.logLevel === "info")
+      console.error("Missing handoff recovery timer cancelled.");
     this.pending = undefined;
   }
 
@@ -97,6 +106,13 @@ class MissingHandoffRecovery {
     );
   }
 
+  expired() {
+    const expired = this.remainingDelay() === 0;
+    if (expired && this.logLevel === "info")
+      console.error("Missing handoff recovery timer expired.");
+    return expired;
+  }
+
   observe(
     assignmentId: string,
     runId: string,
@@ -108,11 +124,14 @@ class MissingHandoffRecovery {
       return;
     }
     if (this.pending?.runId !== runId || this.pending.status !== status) {
+      this.cancel();
       this.pending = { runId, status, started: performance.now() };
+      if (this.logLevel === "info")
+        console.error("Missing handoff recovery timer scheduled.");
       return;
     }
     if (!expired) return;
-    this.cancel();
+    this.pending = undefined;
     this.inFlight = true;
     this.attempts++;
     // Core owns input serialization and stale Assignment rejection.
@@ -151,6 +170,7 @@ class T3Enhancement implements Enhancement {
   private monitoring = false;
   private timer: NodeJS.Timeout | undefined;
   private generation = 0;
+  private observationFailure: "lost" | "reconnect" | "handoff" | undefined;
   constructor(
     io: TerminalIO,
     private readonly context: EnhancementContext,
@@ -359,7 +379,7 @@ class T3Enhancement implements Enhancement {
       let next = 5000;
       try {
         // Only a read started at or after expiry can authorize submission.
-        const expired = this.recovery.remainingDelay() === 0;
+        const expired = this.recovery.expired();
         const observation = this.current() ? await this.observe() : undefined;
         if (
           observation &&
@@ -370,13 +390,35 @@ class T3Enhancement implements Enhancement {
           const { candidate, runId, status } = observation;
           this.recovery.observe(candidate.id, runId, status, expired);
         } else this.recovery.cancel();
-      } catch {
+        this.observationFailure = undefined;
+      } catch (error) {
+        if (this.signal.aborted) return;
+        if (!(error instanceof HandoffCheckError)) this.activeRun = undefined;
         this.recovery.cancel();
+        this.reportFailure(error);
         next = 10000;
       }
       this.schedule(Math.min(next, Math.ceil(this.recovery.remainingDelay())));
     }, delay);
     this.timer.unref();
+  }
+
+  private reportFailure(error: unknown) {
+    const failure =
+      error instanceof HandoffCheckError
+        ? "handoff"
+        : this.observationFailure === "lost" ||
+            this.observationFailure === "reconnect"
+          ? "reconnect"
+          : "lost";
+    if (failure === this.observationFailure) return;
+    this.observationFailure = failure;
+    const messages = {
+      lost: "T3 observation lost; retrying in 10 seconds.",
+      reconnect: "T3 observation reconnect failed; retrying in 10 seconds.",
+      handoff: "Missing handoff recovery check failed; retrying in 10 seconds.",
+    };
+    console.error(messages[failure]);
   }
 
   async startMonitoring() {
