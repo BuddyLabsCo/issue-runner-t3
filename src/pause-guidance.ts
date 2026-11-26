@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { callMcp } from "./authorization.js";
 
 const confirmation =
-  /(?:Enter to retry, (?:s to skip [^\n]+, )?q\/EOF to cancel\. Other input is unsupported\.|^Enter to restart the entire [^\n]+, or q to exit Runner\.|^\[Enhancement Pause\] [\s\S]*\nEnter to continue\. Other input is unsupported\.)\n$/;
+  /(?:Enter to retry, (?:s to skip [^\n]+, )?q\/EOF to cancel\. Other input is unsupported\.|^(?:\[Operator Pause\] [^\n]+: )?Enter to restart the entire [^\n]+, or q to exit Runner\.|^\[Enhancement Pause\] [\s\S]*\nEnter to continue\. Other input is unsupported\.)\n$/;
 
 type Wait = {
   listener: ReturnType<typeof process.stdin.listeners>[number];

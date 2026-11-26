@@ -7,11 +7,15 @@ import {
 import { test } from "node:test";
 import { TerminalOperator } from "../node_modules/issue-runner-core/dist/adapters/terminal.js";
 import { TerminalConfirmations } from "../node_modules/issue-runner-core/dist/run/confirmations.js";
-import { pauseForOperator } from "../node_modules/issue-runner-core/dist/run/operations.js";
+import {
+  pauseForOperator,
+  scopeOperator,
+  serializeOperator,
+} from "../node_modules/issue-runner-core/dist/run/operations.js";
 import { restartUnrecoverable } from "../node_modules/issue-runner-core/dist/run/execution-recovery.js";
 import { startPauseGuidance } from "../dist/pause-guidance.js";
 import { saveCredential } from "../dist/credentials.js";
-import { createServer } from "node:http";
+import { substitute } from "./fixtures/mcp-substitute.mjs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -43,56 +47,27 @@ async function fixture(t, tty, respond = () => ({}), enabled = undefined) {
     await rm(home, { recursive: true, force: true });
   });
   const calls = [];
-  const server = createServer(async (req, res) => {
-    try {
-      assert.equal(req.headers.authorization, "Bearer guidance-fixture-token");
-      if (req.method !== "POST") {
-        res.writeHead(405).end();
-        return;
-      }
-      let body = "";
-      for await (const chunk of req) body += chunk;
-      const rpc = JSON.parse(body);
-      const json = (result) =>
-        res
-          .writeHead(200, { "content-type": "application/json" })
-          .end(JSON.stringify({ jsonrpc: "2.0", id: rpc.id, result }));
-      if (rpc.method === "initialize") {
-        json({
-          protocolVersion: "2025-06-18",
-          capabilities: { tools: {} },
-          serverInfo: { name: "test", version: "1" },
-        });
-      } else if (rpc.method === "notifications/initialized") {
-        res.writeHead(202).end();
-      } else {
-        assert.equal(rpc.method, "tools/call");
-        assert.equal(rpc.params.name, "t3_thread_send");
-        calls.push(rpc.params.arguments);
-        const extra = await respond(calls.length);
-        json({
-          structuredContent: {
-            threadId: "launcher",
-            runId: "queued-run",
-            messageId: "queued-message",
-            delivery: "queued",
-            ...extra,
-          },
-          content: [],
-        });
-      }
-    } catch (error) {
-      res.writeHead(500).end(String(error));
-    }
+  const server = await substitute(async (name, args, authorization) => {
+    assert.equal(name, "t3_thread_send");
+    assert.equal(authorization, `Bearer ${server.token}`);
+    calls.push(args);
+    const extra = await respond(calls.length);
+    return {
+      threadId: "launcher",
+      runId: "queued-run",
+      messageId: "queued-message",
+      delivery: "queued",
+      ...extra,
+    };
   });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => {
-    server.closeAllConnections();
-    return new Promise((resolve) => server.close(resolve));
+  server.state.structuredContent = true;
+  t.after(async () => {
+    await server.close(true);
+    assert.equal(server.state.reads, 0);
   });
-  const endpoint = `http://127.0.0.1:${server.address().port}/mcp`;
+  const endpoint = server.endpoint;
   await saveCredential(endpoint, {
-    accessToken: "guidance-fixture-token",
+    accessToken: server.token,
     expiresAt: Date.now() + 120_000,
     scope: "orchestration:operate",
   });
@@ -116,11 +91,18 @@ async function fixture(t, tty, respond = () => ({}), enabled = undefined) {
     input.destroy();
     output.destroy();
   });
+  const queue = new TerminalConfirmations(operator, controller.signal);
   return {
     input,
     output,
     operator,
-    queue: new TerminalConfirmations(operator, controller.signal),
+    queue,
+    serialized: serializeOperator(
+      operator,
+      controller,
+      controller.signal,
+      queue,
+    ),
     calls,
     stop,
     write,
@@ -130,7 +112,8 @@ async function fixture(t, tty, respond = () => ({}), enabled = undefined) {
 
 for (const tty of [false, true]) {
   test(`Core confirmation guidance preserves FIFO identity (TTY=${tty})`, async (t) => {
-    const { input, operator, queue, calls, rendered } = await fixture(t, tty);
+    const { input, operator, queue, serialized, calls, rendered } =
+      await fixture(t, tty);
     for (let i = 0; i < 20; i++)
       operator.write(`line ${i}: ${i === 19 ? "x".repeat(20000) : ""}`);
     const first = queue.request({
@@ -188,18 +171,31 @@ for (const tty of [false, true]) {
     assert.equal(calls.length, 3);
     input.write("\n");
     assert.equal(await third, "");
-    for (const scope of ["Issue #42", "Documentation Maintenance"]) {
-      const restart = restartUnrecoverable(operator, scope);
-      await until(() => calls.length === (scope === "Issue #42" ? 4 : 5));
-      assert.ok(
-        calls
-          .at(-1)
-          .message.includes(
-            `Enter to restart the entire ${scope}, or q to exit Runner.`,
-          ),
-      );
-      input.write("\n");
-      await restart;
+    for (const [restartOperator, scope, expected] of [
+      [
+        serialized,
+        "Issue #42",
+        "Enter to restart the entire Issue #42, or q to exit Runner.",
+      ],
+      [
+        scopeOperator(
+          serialized,
+          "the current Documentation Maintenance occurrence",
+        ),
+        "Documentation Maintenance occurrence",
+        "[Operator Pause] the current Documentation Maintenance occurrence: Enter to restart the entire Documentation Maintenance occurrence, or q to exit Runner.",
+      ],
+    ]) {
+      const count = calls.length;
+      const restart = restartUnrecoverable(restartOperator, scope);
+      try {
+        await until(() => rendered().split("\n").includes(expected));
+        await until(() => calls.length === count + 1);
+        assert.ok(calls.at(-1).message.split("\n").includes(expected));
+      } finally {
+        input.write("\n");
+        await restart;
+      }
     }
     const pause = pauseForOperator(operator, "Unscoped operation failed.");
     await until(() => calls.length === 6);
