@@ -236,6 +236,7 @@ class T3Enhancement implements Enhancement {
         typeof thread.activeRunId === "string" ? thread.activeRunId : undefined;
       return { thread, items, earlierPosition: result.earlierPosition };
     } catch (error) {
+      // A failed native read invalidates active Run ownership; reply extraction does not.
       this.activeRun = undefined;
       throw error;
     }
@@ -314,10 +315,11 @@ class T3Enhancement implements Enhancement {
   }
 
   private async missing(candidate: Assignment) {
+    if (!this.current() || candidate !== this.assignment) return false;
     const absent = await handoffAbsent(
       resolve(this.context.cwd, candidate.expectedFile),
     );
-    if (!absent && candidate === this.assignment) {
+    if (!absent && this.current() && candidate === this.assignment) {
       this.recovery.reset();
     }
     return absent;
@@ -330,8 +332,9 @@ class T3Enhancement implements Enhancement {
     const { thread } = page;
     if (
       !candidate ||
-      candidate !== this.assignment ||
-      !(await this.missing(candidate))
+      !(await this.missing(candidate)) ||
+      !this.current() ||
+      candidate !== this.assignment
     )
       return;
     const runId = thread.latestRunId;
@@ -393,7 +396,6 @@ class T3Enhancement implements Enhancement {
         this.observationFailure = undefined;
       } catch (error) {
         if (this.signal.aborted) return;
-        if (!(error instanceof HandoffCheckError)) this.activeRun = undefined;
         this.recovery.cancel();
         this.reportFailure(error);
         next = 10000;

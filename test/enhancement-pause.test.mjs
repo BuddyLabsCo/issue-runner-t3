@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import fs, { mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -441,6 +442,7 @@ test("observation loss prevents adopting a stale active Run on replacement", asy
 function clock(t) {
   let now = Math.ceil(performance.now());
   let scheduled;
+  let polling;
   const clear = globalThis.clearTimeout;
   t.mock.method(performance, "now", () => now);
   t.mock.method(globalThis, "setTimeout", (callback, ms, ...args) => {
@@ -460,7 +462,7 @@ function clock(t) {
     if (scheduled && scheduled.due <= now) {
       const { callback } = scheduled;
       scheduled = undefined;
-      void callback();
+      polling = callback();
       return true;
     }
     return false;
@@ -472,12 +474,48 @@ function clock(t) {
   return {
     tick,
     settle,
+    waitForPoll: () => polling,
     async observe(f, ms) {
       assert.ok(tick(ms), "Expected a fresh Thread observation");
       await settle(f);
     },
   };
 }
+
+test("replacement adopts an active Run discovered when a continuation invalidates the previous page", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t);
+  await f.assign("first");
+  f.set(
+    "completed",
+    ["old"],
+    [
+      reply("old", "split", 0, "[action", {
+        textTruncated: true,
+        nextTextOffset: 7,
+      }),
+    ],
+  );
+  f.onContinuation(() =>
+    f.set(
+      "running",
+      ["active", "old"],
+      [],
+      new Map([["split", reply("old", "split", 0, " required]")]]),
+    ),
+  );
+  await time.observe(f, 5000);
+  assert.ok(f.seen.some((args) => args.itemId === "split"));
+  assert.equal(f.confirmations.status.active, undefined);
+  await f.assign("replacement");
+  f.set(
+    "completed",
+    ["active", "old"],
+    [reply("active", "marker", 1, "[action required] adopted Run")],
+  );
+  await time.observe(f, 10000);
+  assert.ok(f.confirmations.status.active);
+});
 
 test("recovers a missing handoff once, via Core queue delivery, after a full delay", async (t) => {
   const time = clock(t);
@@ -838,6 +876,51 @@ for (const stop of ["Runner cancellation", "Enhancement stop"]) {
     assert.equal(time.tick(5000), false);
     assert.equal(f.seen.length, reads);
     assert.equal(f.requests.length, 0);
+  });
+}
+
+for (const action of [
+  "Runner cancellation",
+  "Enhancement stop",
+  "Assignment replacement",
+]) {
+  test(`${action} prevents further handoff checks after an in-progress check settles`, async (t) => {
+    const time = clock(t);
+    const f = await fixture(t, { handoffRecoveryDelaySeconds: 0 });
+    const file = await f.assign("first");
+    f.set(
+      "completed",
+      ["run"],
+      [reply("run", "marker", 0, "[action required]")],
+    );
+    const pending = Promise.withResolvers();
+    let accesses = 0;
+    const originalAccess = fs.access;
+    const access = t.mock.method(fs, "access", async (path, ...args) => {
+      if (path === file && ++accesses === 1) await pending.promise;
+      return originalAccess(path, ...args);
+    });
+    syncBuiltinESMExports();
+    t.after(() => {
+      access.mock.restore();
+      syncBuiltinESMExports();
+      pending.resolve();
+    });
+
+    assert.ok(time.tick(5000));
+    await f.releaseObservation();
+    await until(() => accesses === 1);
+    if (action === "Runner cancellation") f.controller.abort();
+    else if (action === "Enhancement stop") await f.stopEnhancement();
+    else await f.assign("replacement");
+    pending.resolve();
+    await time.waitForPoll();
+
+    assert.equal(accesses, 1);
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.confirmations.status.active, undefined);
+    if (action === "Assignment replacement") await time.observe(f, 5000);
+    else assert.equal(time.tick(10000), false);
   });
 }
 
