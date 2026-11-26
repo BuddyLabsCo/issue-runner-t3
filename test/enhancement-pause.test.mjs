@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -45,6 +45,7 @@ async function taskThread(home) {
   let nextContinuation;
   let unavailable = false;
   const seen = [];
+  const sends = [];
   const server = await substitute(async (name, args, authorization) => {
     assert.equal(authorization, `Bearer ${server.token}`);
     if (name === "t3_thread_read") {
@@ -95,12 +96,14 @@ async function taskThread(home) {
         hasMore: false,
       };
     }
-    if (name === "t3_thread_send")
+    if (name === "t3_thread_send") {
+      sends.push(args);
       return {
         threadId: "task",
         runId: "receipt",
         messageId: "receipt-message",
       };
+    }
     if (name === "t3_queue") return { items: [], nextCursor: null };
     if (name === "t3_thread_organize") return { sequence: 1 };
     assert.fail(`Unexpected tool ${name}`);
@@ -109,6 +112,13 @@ async function taskThread(home) {
     server,
     release: () => pending?.resolve(),
     seen,
+    sends,
+    async releaseObservation() {
+      await until(() => pending !== undefined);
+      const observation = pending;
+      pending = undefined;
+      observation.resolve();
+    },
     onContinuation(update) {
       nextContinuation = update;
     },
@@ -136,7 +146,41 @@ async function taskThread(home) {
   };
 }
 
-async function fixture(t) {
+function recoveryProbe(recover) {
+  const requests = [];
+  let settledRequests = 0;
+  let instance;
+  return {
+    requests,
+    waitForRequests: (count) => until(() => settledRequests === count),
+    stopEnhancement: () => instance.stop(),
+    module: {
+      contractVersion: enhancement.contractVersion,
+      async createEnhancement(io, request, context, settings) {
+        instance = await enhancement.createEnhancement(
+          io,
+          async (id) => {
+            requests.push(id);
+            try {
+              await recover(request, id);
+            } finally {
+              settledRequests++;
+            }
+          },
+          context,
+          settings,
+        );
+        return instance;
+      },
+    },
+  };
+}
+
+async function fixture(
+  t,
+  config = { retryLimit: 0 },
+  recover = (request, id) => request(id),
+) {
   const home = await mkdtemp(join(tmpdir(), "enhancement-pause-"));
   const oldHome = process.env.HOME;
   const oldProfile = process.env.USERPROFILE;
@@ -175,10 +219,11 @@ async function fixture(t) {
     undefined,
     confirmations,
   );
+  const { module, ...probe } = recoveryProbe(recover);
   const tab = await conversations.create(
     { cwd: home, env: {}, label: "task", submitKey: "Enter" },
-    enhancement,
-    {},
+    module,
+    config,
   );
   t.after(async () => {
     await conversations.stop(tab);
@@ -194,7 +239,10 @@ async function fixture(t) {
   );
   return {
     ...thread,
+    ...probe,
+    io: tab.io,
     input,
+    controller,
     confirmations,
     rendered: () => rendered,
     async assign(name) {
@@ -382,4 +430,445 @@ test("observation loss prevents adopting a stale active Run on replacement", asy
   );
   await f.poll();
   assert.ok(f.confirmations.status.active);
+});
+
+// Drive monitor timers independently of the real MCP transport's timeouts.
+function clock(t) {
+  let now = Math.ceil(performance.now());
+  let scheduled;
+  const clear = globalThis.clearTimeout;
+  t.mock.method(performance, "now", () => now);
+  t.mock.method(globalThis, "setTimeout", (callback, ms, ...args) => {
+    if (callback.constructor.name !== "AsyncFunction")
+      return realTimeout(callback, ms, ...args);
+    assert.equal(scheduled, undefined);
+    const timer = { due: now + ms, callback, unref() {} };
+    scheduled = timer;
+    return timer;
+  });
+  t.mock.method(globalThis, "clearTimeout", (timer) => {
+    if (timer === scheduled) scheduled = undefined;
+    else clear(timer);
+  });
+  function tick(ms) {
+    now += ms;
+    if (scheduled && scheduled.due <= now) {
+      const { callback } = scheduled;
+      scheduled = undefined;
+      void callback();
+      return true;
+    }
+    return false;
+  }
+  async function settle(f) {
+    await f.releaseObservation();
+    await until(() => scheduled !== undefined);
+  }
+  return {
+    tick,
+    settle,
+    async observe(f, ms) {
+      assert.ok(tick(ms), "Expected a fresh Thread observation");
+      await settle(f);
+    },
+  };
+}
+
+test("recovers a missing handoff once, via Core queue delivery, after a full delay", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, {
+    retryLimit: 1,
+    handoffRecoveryDelaySeconds: 12,
+  });
+  await f.assign("first");
+  f.set("completed", ["run"], [reply("run", "done", 0, "Done")]);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  time.tick(1999);
+  assert.equal(f.sends.length, 1);
+  await time.observe(f, 1);
+  await until(() => f.sends.length === 2);
+  await f.waitForRequests(1);
+  assert.deepEqual(
+    f.sends.map(({ threadId, mode, message }) => ({ threadId, mode, message })),
+    [
+      { threadId: "task", mode: "queue", message: "first" },
+      { threadId: "task", mode: "queue", message: "continue" },
+    ],
+  );
+});
+
+test("a read begun before expiry cannot authorize recovery after expiry", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 8 });
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  assert.ok(time.tick(5000));
+  time.tick(3000);
+  await time.settle(f);
+  assert.equal(f.requests.length, 0);
+  // The expiry observation, not the earlier slow read, must authorize input.
+  f.set("running", ["new", "run"], []);
+  await time.observe(f, 0);
+  assert.equal(f.sends.length, 1);
+});
+
+test("only eligible native status starts a delay; a new Run or ineligible status restarts it", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { handoffRecoveryDelaySeconds: 8 });
+  await f.assign("first");
+  for (const status of [
+    "idle",
+    "running",
+    "failed",
+    "cancelled",
+    "rolled_back",
+    "unknown",
+  ]) {
+    f.set(status, ["one"], []);
+    await time.observe(f, 5000);
+    await time.observe(f, 5000);
+    assert.equal(f.requests.length, 0, status);
+  }
+  f.set("interrupted", ["one"], []);
+  await time.observe(f, 5000);
+  f.set("completed", ["two", "one"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  f.set("failed", ["two", "one"], []);
+  await time.observe(f, 3000);
+  assert.equal(f.requests.length, 0);
+  f.set("interrupted", ["two", "one"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 3000);
+  await until(() => f.sends.length === 2);
+  await f.waitForRequests(1);
+  assert.equal(f.requests.length, 1);
+});
+
+test("a replacement without a new Run gets a full delay but cannot inherit the preceding marker", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 8 });
+  await f.assign("first");
+  f.set(
+    "completed",
+    ["old"],
+    [reply("old", "marker", 0, "[action required] old")],
+  );
+  await time.observe(f, 5000);
+  assert.ok(f.confirmations.status.active);
+  f.input.write("\n");
+  await until(() => !f.confirmations.status.active);
+  await time.observe(f, 5000);
+  await f.assign("replacement");
+  await time.observe(f, 5000);
+  assert.equal(f.confirmations.status.active, undefined);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 3000);
+  await until(() => f.sends.length === 3);
+  assert.equal(f.requests.length, 1);
+  assert.deepEqual(
+    f.sends.map(({ threadId, mode, message }) => [threadId, mode, message]),
+    [
+      ["task", "queue", "first"],
+      ["task", "queue", "replacement"],
+      ["task", "queue", "continue"],
+    ],
+  );
+});
+
+test("handoff appearance at expiry cancels recovery and observing existence resets the budget", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 5 });
+  const file = await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  assert.ok(time.tick(5000));
+  await writeFile(file, "{}");
+  await time.settle(f);
+  assert.equal(f.requests.length, 0);
+  await unlink(file);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 5000);
+  await until(() => f.sends.length === 2);
+  await f.waitForRequests(1);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 1);
+  await writeFile(file, "{}");
+  await time.observe(f, 5000);
+  await unlink(file);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 1);
+  await time.observe(f, 5000);
+  await until(() => f.sends.length === 3);
+  assert.equal(f.requests.length, 2);
+});
+
+test("a file-access error at expiry invalidates the delay until absence is confirmed again", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 5 });
+  const file = await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  try {
+    await symlink(file, file, "file");
+  } catch (error) {
+    if (process.platform === "win32" && error.code === "EPERM") {
+      t.skip("Windows symlink creation requires developer mode or privilege");
+      return;
+    }
+    throw error;
+  }
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 0);
+  await unlink(file);
+  await time.observe(f, 10000);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 5000);
+  await until(() => f.sends.length === 2);
+  await f.waitForRequests(1);
+});
+
+test("an unavailable expiry observation cancels the delay; reconnect waits the full interval", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 5 });
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  f.failNext();
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 0);
+  assert.equal(time.tick(9999), false);
+  await time.observe(f, 1);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 5000);
+  await until(() => f.sends.length === 2);
+  await f.waitForRequests(1);
+});
+
+test("pausing at expiry cancels recovery and Enter waits again without restoring the attempt budget", async (t) => {
+  const time = clock(t);
+  const errors = t.mock.method(console, "error", () => {});
+  const f = await fixture(t, { retryLimit: 2, handoffRecoveryDelaySeconds: 5 });
+  await f.assign("first");
+  f.set("completed", ["one"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  await until(() => f.sends.length === 2);
+  await f.waitForRequests(1);
+  f.set("completed", ["two", "one"], []);
+  await time.observe(f, 5000);
+  f.set(
+    "completed",
+    ["two", "one"],
+    [reply("two", "marker", 0, "[action required] wait")],
+  );
+  await time.observe(f, 5000);
+  assert.ok(f.confirmations.status.active);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 1);
+  f.input.write("\n");
+  await until(() => !f.confirmations.status.active);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 1);
+  await time.observe(f, 5000);
+  await until(() => f.sends.length === 3);
+  await f.waitForRequests(2);
+  f.set("interrupted", ["three", "two"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.confirmations.status.active, undefined);
+  assert.equal(
+    errors.mock.calls.filter(({ arguments: args }) =>
+      String(args[0]).includes("exhausted"),
+    ).length,
+    1,
+  );
+  await f.assign("replacement");
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  await until(() => f.requests.length === 3);
+  assert.notEqual(f.requests[2], f.requests[1]);
+});
+
+test("Core stale resolutions consume attempts and leave monitoring active", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 0 });
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  await f.complete();
+  await time.observe(f, 0);
+  assert.equal(f.requests.length, 1);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.sends.length, 1);
+  assert.equal(f.confirmations.status.active, undefined);
+});
+
+test("an in-flight Core request settles without replay and a rejection disables recovery across replacements", async (t) => {
+  const time = clock(t);
+  const submission = Promise.withResolvers();
+  const f = await fixture(
+    t,
+    { retryLimit: 3, handoffRecoveryDelaySeconds: 0 },
+    () => submission.promise,
+  );
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 0);
+  assert.equal(f.requests.length, 1);
+  await f.assign("replacement");
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 1);
+  submission.reject(new Error("Core rejected input"));
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 1);
+  f.set(
+    "interrupted",
+    ["new", "run"],
+    [reply("new", "marker", 0, "[action required] still pause")],
+  );
+  await time.observe(f, 5000);
+  assert.ok(f.confirmations.status.active);
+});
+
+for (const stop of ["Runner cancellation", "Enhancement stop"]) {
+  test(`${stop} cancels a pending recovery and further observations`, async (t) => {
+    const time = clock(t);
+    const f = await fixture(t, { handoffRecoveryDelaySeconds: 5 });
+    await f.assign("first");
+    f.set("completed", ["run"], []);
+    await time.observe(f, 5000);
+    if (stop === "Runner cancellation") f.controller.abort();
+    else await f.stopEnhancement();
+    const reads = f.seen.length;
+    assert.equal(time.tick(5000), false);
+    assert.equal(time.tick(5000), false);
+    assert.equal(f.seen.length, reads);
+    assert.equal(f.requests.length, 0);
+  });
+}
+
+test("default delay and retry budget are 120 seconds and three attempts", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, {});
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await time.observe(f, 5000);
+    await time.observe(f, 119999);
+    assert.equal(f.requests.length, attempt);
+    await time.observe(f, 1);
+    await until(() => f.sends.length === attempt + 2);
+    await f.waitForRequests(attempt + 1);
+  }
+  await time.observe(f, 5000);
+  await time.observe(f, 120000);
+  assert.equal(f.requests.length, 3);
+  assert.equal(f.confirmations.status.active, undefined);
+});
+
+test("zero retry budget still allows Pause but never requests recovery", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { retryLimit: 0, handoffRecoveryDelaySeconds: 0 });
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 5000);
+  f.set("completed", ["run"], [reply("run", "marker", 0, "[action required]")]);
+  await time.observe(f, 5000);
+  assert.ok(f.confirmations.status.active);
+  assert.equal(f.requests.length, 0);
+});
+
+test("recovery settings reject invalid values at the public factory", async (t) => {
+  clock(t);
+  const f = await fixture(t);
+  const io = f.io;
+  const context = {
+    cwd: process.cwd(),
+    env: {},
+    enhancementPause: () => assert.fail("Unexpected pause"),
+  };
+  for (const value of [-1, 1.5, NaN, Infinity, "3", null]) {
+    await assert.rejects(
+      enhancement.createEnhancement(io, () => {}, context, {
+        retryLimit: value,
+      }),
+      /retryLimit must be a nonnegative integer/,
+    );
+  }
+  for (const value of [-1, NaN, Infinity, "120", null]) {
+    await assert.rejects(
+      enhancement.createEnhancement(io, () => {}, context, {
+        handoffRecoveryDelaySeconds: value,
+      }),
+      /handoffRecoveryDelaySeconds must be finite nonnegative seconds/,
+    );
+  }
+});
+
+test("replacement during an expiry read cannot reuse the old delay", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, { retryLimit: 1, handoffRecoveryDelaySeconds: 5 });
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  assert.ok(time.tick(5000));
+  await f.assign("replacement");
+  await time.settle(f);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 5000);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 5000);
+  await until(() => f.sends.length === 3);
+  assert.equal(f.requests.length, 1);
+});
+
+test("an in-flight request can settle after Enhancement stop without starting another request", async (t) => {
+  const time = clock(t);
+  const submission = Promise.withResolvers();
+  const f = await fixture(
+    t,
+    { handoffRecoveryDelaySeconds: 0 },
+    () => submission.promise,
+  );
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  await time.observe(f, 0);
+  assert.equal(f.requests.length, 1);
+  await f.stopEnhancement();
+  submission.resolve();
+  await f.waitForRequests(1);
+  assert.equal(time.tick(10000), false);
+  assert.equal(f.requests.length, 1);
+});
+
+test("fractional seconds are valid and require a fresh expiry observation", async (t) => {
+  const time = clock(t);
+  const f = await fixture(t, {
+    retryLimit: 1,
+    handoffRecoveryDelaySeconds: 0.25,
+  });
+  await f.assign("first");
+  f.set("completed", ["run"], []);
+  await time.observe(f, 5000);
+  assert.equal(time.tick(249), false);
+  assert.equal(f.requests.length, 0);
+  await time.observe(f, 1);
+  await until(() => f.sends.length === 2);
+  assert.equal(f.requests.length, 1);
 });
